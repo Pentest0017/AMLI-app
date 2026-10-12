@@ -109,8 +109,13 @@ if ! images_present; then
   IMG_REPO="${AMLI_IMAGES_REPO:-Pentest0017/AMLI-prereqs}"; IMG_TAG="${AMLI_IMAGES_TAG:-images-app-v1}"
   for d in "$(pwd)/../AMLI-prereqs" "$HOME/AMLI-prereqs"; do
     if [ -f "$d/load-images.sh" ]; then
-      echo "Pre-built images not loaded - downloading ${IMG_REPO}@${IMG_TAG} via $d/load-images.sh"
-      bash "$d/load-images.sh" "$IMG_REPO" "$IMG_TAG" || echo "Download/load failed - will try to build instead."
+      if [ -d "$d/payload/app" ]; then
+        echo "Pre-built images not loaded - loading them from $d/payload/app"
+        bash "$d/load-images.sh" --local "$d/payload/app" || echo "Loading failed - will try to build instead."
+      else
+        echo "Pre-built images not loaded - downloading ${IMG_REPO}@${IMG_TAG} via $d/load-images.sh"
+        bash "$d/load-images.sh" "$IMG_REPO" "$IMG_TAG" || echo "Download/load failed - will try to build instead."
+      fi
       break
     fi
   done
@@ -121,8 +126,13 @@ BASE_IMG_TAG="${AMLI_BASE_IMAGES_TAG:-images-base-v1}"
 if ! $SUDO $ENGINE image inspect docker.io/qdrant/qdrant:v1.14.0 >/dev/null 2>&1; then
   for d in "$(pwd)/../AMLI-prereqs" "$HOME/AMLI-prereqs"; do
     if [ -f "$d/load-images.sh" ]; then
-      echo "Base images not loaded - downloading ${IMG_REPO:-Pentest0017/AMLI-prereqs}@${BASE_IMG_TAG}"
-      bash "$d/load-images.sh" "${IMG_REPO:-Pentest0017/AMLI-prereqs}" "$BASE_IMG_TAG" || echo "Base image download failed - compose will try to pull them."
+      if [ -d "$d/payload/base" ]; then
+        echo "Base images not loaded - loading them from $d/payload/base"
+        bash "$d/load-images.sh" --local "$d/payload/base" || echo "Loading failed - compose will try to pull them."
+      else
+        echo "Base images not loaded - downloading ${IMG_REPO:-Pentest0017/AMLI-prereqs}@${BASE_IMG_TAG}"
+        bash "$d/load-images.sh" "${IMG_REPO:-Pentest0017/AMLI-prereqs}" "$BASE_IMG_TAG" || echo "Base image download failed - compose will try to pull them."
+      fi
       break
     fi
   done
