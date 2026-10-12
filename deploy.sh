@@ -109,6 +109,18 @@ if ! images_present; then
     fi
   done
 fi
+# Base images (qdrant, caddy, mailhog) - load from the AMLI-prereqs release if they are not present,
+# so the server never has to pull from a registry it cannot verify.
+BASE_IMG_TAG="${AMLI_BASE_IMAGES_TAG:-images-base-v1}"
+if ! $SUDO $ENGINE image inspect docker.io/qdrant/qdrant:v1.14.0 >/dev/null 2>&1; then
+  for d in "$(pwd)/../AMLI-prereqs" "$HOME/AMLI-prereqs"; do
+    if [ -f "$d/load-images.sh" ]; then
+      echo "Base images not loaded - downloading ${IMG_REPO:-Pentest0017/AMLI-prereqs}@${BASE_IMG_TAG}"
+      bash "$d/load-images.sh" "${IMG_REPO:-Pentest0017/AMLI-prereqs}" "$BASE_IMG_TAG" || echo "Base image download failed - compose will try to pull them."
+      break
+    fi
+  done
+fi
 if images_present; then
   echo "Pre-built AMLI images found - skipping the build."
 else
