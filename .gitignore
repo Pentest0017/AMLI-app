@@ -7,6 +7,7 @@
 .env.*
 !.env.example
 !.env.localdb.example
+!.env.external.example
 cli/.mcp.env
 **/charts/*/custom-values.yaml
 **/charts/*/custom.yaml

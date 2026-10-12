@@ -44,14 +44,20 @@ echo "engine=$ENGINE podman=$IS_PODMAN rootless=$ROOTLESS compose='$COMPOSE'"
 # ---- 2. .env checks ---------------------------------------------------------
 say "2/7 Checking .env"
 if [ ! -f .env ]; then
-  [ -f .env.localdb.example ] || fail "Neither .env nor .env.localdb.example found in $(pwd)"
-  echo "No .env found: creating it from .env.localdb.example (all-in-one, database in a container)"
+  TEMPLATE=.env.localdb.example; DB_PW_GEN=""
+  if [ "${AMLI_DB_MODE:-}" = "external" ]; then
+    TEMPLATE=.env.external.example
+    [ -n "${AMLI_DB_PASSWORD:-}" ] || fail "External DB mode: run as  AMLI_DB_MODE=external AMLI_DB_PASSWORD='<password>' bash deploy.sh"
+    DB_PW_GEN="$(printf '%s' "$AMLI_DB_PASSWORD" | sed -e 's#[\\/&|]#\\&#g')"
+  fi
+  [ -f "$TEMPLATE" ] || fail "Neither .env nor $TEMPLATE found in $(pwd)"
+  echo "No .env found: creating it from $TEMPLATE"
   HOST_IP="${AMLI_HOST:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
   [ -n "$HOST_IP" ] || HOST_IP="localhost"
   rand() { head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c "$1"; }
   SECRET_KEY_GEN="$(rand 64)"
-  DB_PW_GEN="Isg$(rand 16)Aa1!"
-  cp .env.localdb.example .env
+  [ -n "$DB_PW_GEN" ] || DB_PW_GEN="Isg$(rand 16)Aa1!"
+  cp "$TEMPLATE" .env
   sed -i -e "s|__HOST__|${HOST_IP}|g" -e "s|__SECRET_KEY__|${SECRET_KEY_GEN}|" -e "s|__DB_PASSWORD__|${DB_PW_GEN}|g" .env
   chmod 600 .env
   echo "Server address set to ${HOST_IP} (override with: AMLI_HOST=<ip-or-name> bash deploy.sh)"
