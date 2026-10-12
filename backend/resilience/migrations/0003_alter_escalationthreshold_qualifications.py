@@ -14,8 +14,8 @@ def safe_mssql_migration(apps, schema_editor):
             BEGIN
                 CREATE TABLE resilience_escalationthreshold_qualifications (
                     id BIGINT IDENTITY(1,1) PRIMARY KEY,
-                    escalationthreshold_id BIGINT NOT NULL,
-                    terminology_id BIGINT NOT NULL
+                    escalationthreshold_id CHAR(32) NOT NULL,
+                    terminology_id CHAR(32) NOT NULL
                 );
             END;
             """)

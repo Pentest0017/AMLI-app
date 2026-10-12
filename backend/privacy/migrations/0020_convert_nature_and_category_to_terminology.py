@@ -37,13 +37,13 @@ def safe_mssql_migration(apps, schema_editor):
             BEGIN
                 CREATE TABLE privacy_processing_nature (
                     id BIGINT IDENTITY(1,1) PRIMARY KEY,
-                    processing_id BIGINT NOT NULL,
-                    terminology_id BIGINT NOT NULL
+                    processing_id CHAR(32) NOT NULL,
+                    terminology_id CHAR(32) NOT NULL
                 );
             END;
             IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('privacy_personaldata') AND name = 'category_id')
             BEGIN
-                ALTER TABLE privacy_personaldata ADD category_id BIGINT NULL;
+                ALTER TABLE privacy_personaldata ADD category_id CHAR(32) NULL;
             END;
             IF EXISTS (SELECT * FROM sys.tables WHERE name = 'privacy_processingnature')
             BEGIN

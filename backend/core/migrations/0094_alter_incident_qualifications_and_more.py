@@ -22,16 +22,16 @@ def safe_mssql_migration(apps, schema_editor):
             BEGIN
                 CREATE TABLE core_incident_qualifications (
                     id BIGINT IDENTITY(1,1) PRIMARY KEY,
-                    incident_id BIGINT NOT NULL,
-                    terminology_id BIGINT NOT NULL
+                    incident_id CHAR(32) NOT NULL,
+                    terminology_id CHAR(32) NOT NULL
                 );
             END;
             IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'core_riskscenario_qualifications')
             BEGIN
                 CREATE TABLE core_riskscenario_qualifications (
                     id BIGINT IDENTITY(1,1) PRIMARY KEY,
-                    riskscenario_id BIGINT NOT NULL,
-                    terminology_id BIGINT NOT NULL
+                    riskscenario_id CHAR(32) NOT NULL,
+                    terminology_id CHAR(32) NOT NULL
                 );
             END;
             """)

@@ -14,8 +14,8 @@ def safe_mssql_migration(apps, schema_editor):
             BEGIN
                 CREATE TABLE ebios_rm_fearedevent_qualifications (
                     id BIGINT IDENTITY(1,1) PRIMARY KEY,
-                    fearedevent_id BIGINT NOT NULL,
-                    terminology_id BIGINT NOT NULL
+                    fearedevent_id CHAR(32) NOT NULL,
+                    terminology_id CHAR(32) NOT NULL
                 );
             END;
             """)
