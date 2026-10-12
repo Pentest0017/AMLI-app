@@ -97,7 +97,20 @@ say "4/7 Building images (first time takes several minutes)"
 if $SUDO $ENGINE image inspect localhost/amli-backend:local >/dev/null 2>&1 && $SUDO $ENGINE image inspect localhost/amli-frontend:local >/dev/null 2>&1; then
   echo "Pre-built AMLI images found - skipping the build."
 else
-  $COMPOSE build
+  # Podman has no BuildKit ("booting buildkit" error), so build the two images with the engine
+  # directly and let compose only start containers. Docker keeps using compose to build.
+  export DOCKER_BUILDKIT=0 COMPOSE_DOCKER_CLI_BUILD=0
+  if [ "$IS_PODMAN" = 1 ]; then
+    RAM_MB=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)
+    HEAP_MB=$(( RAM_MB * 3 / 4 )); [ "$HEAP_MB" -gt 8192 ] && HEAP_MB=8192; [ "$HEAP_MB" -lt 3072 ] && HEAP_MB=3072
+    [ "$RAM_MB" -lt 9000 ] && echo "WARNING: ${RAM_MB} MB RAM - the frontend build may run out of memory; prefer the prebuilt images (see AMLI-prereqs/load-images.sh)."
+    echo "Building backend image..."
+    $SUDO $ENGINE build -t localhost/amli-backend:local --build-arg PYTHON_IMAGE=docker.io/library/python:3.14-slim ./backend
+    echo "Building frontend image (Node heap ${HEAP_MB} MB)..."
+    $SUDO $ENGINE build -t localhost/amli-frontend:local --build-arg NODE_IMAGE=docker.io/library/node:22-slim --build-arg NODE_BUILD_HEAP_MB="$HEAP_MB" ./frontend
+  else
+    $COMPOSE build
+  fi
 fi
 
 wait_healthy() { # name, tries
@@ -115,16 +128,16 @@ wait_healthy() { # name, tries
 # ---- 5. Start services in stages -------------------------------------------
 say "5/7 Starting services"
 if [ "$LOCAL_DB" = 1 ]; then
-  $COMPOSE up -d --no-deps db mailhog qdrant
+  $COMPOSE up -d --no-build --no-deps db mailhog qdrant
   echo "Waiting for database container..."
   wait_healthy db 60
 else
-  $COMPOSE up -d --no-deps mailhog qdrant
+  $COMPOSE up -d --no-build --no-deps mailhog qdrant
 fi
-$COMPOSE up -d --no-deps backend
+$COMPOSE up -d --no-build --no-deps backend
 echo "Waiting for backend (first start can take a few minutes)..."
 wait_healthy backend 60
-$COMPOSE up -d --no-deps huey frontend caddy
+$COMPOSE up -d --no-build --no-deps huey frontend caddy
 
 # ---- 6. Migrate -------------------------------------------------------------
 say "6/7 Running database migrations"
