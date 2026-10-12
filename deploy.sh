@@ -94,7 +94,22 @@ fi
 
 # ---- 4. Build ---------------------------------------------------------------
 say "4/7 Building images (first time takes several minutes)"
-if $SUDO $ENGINE image inspect localhost/amli-backend:local >/dev/null 2>&1 && $SUDO $ENGINE image inspect localhost/amli-frontend:local >/dev/null 2>&1; then
+images_present() {
+  $SUDO $ENGINE image inspect localhost/amli-backend:local >/dev/null 2>&1     && $SUDO $ENGINE image inspect localhost/amli-frontend:local >/dev/null 2>&1
+}
+if ! images_present; then
+  # Try the pre-built images published by AMLI-prereqs before building (building needs
+  # Docker Hub / PyPI / npm access, which locked-down servers do not have).
+  IMG_REPO="${AMLI_IMAGES_REPO:-Pentest0017/AMLI-prereqs}"; IMG_TAG="${AMLI_IMAGES_TAG:-images-app-v1}"
+  for d in "$(pwd)/../AMLI-prereqs" "$HOME/AMLI-prereqs"; do
+    if [ -f "$d/load-images.sh" ]; then
+      echo "Pre-built images not loaded - downloading ${IMG_REPO}@${IMG_TAG} via $d/load-images.sh"
+      bash "$d/load-images.sh" "$IMG_REPO" "$IMG_TAG" || echo "Download/load failed - will try to build instead."
+      break
+    fi
+  done
+fi
+if images_present; then
   echo "Pre-built AMLI images found - skipping the build."
 else
   # Podman has no BuildKit ("booting buildkit" error), so build the two images with the engine
