@@ -127,6 +127,24 @@ if ! $SUDO $ENGINE image inspect docker.io/qdrant/qdrant:v1.14.0 >/dev/null 2>&1
     fi
   done
 fi
+# SQL Server image for the all-in-one mode (DB_HOST=db). It cannot be redistributed on GitHub, so it
+# is either pulled from Microsoft's registry or copied once by hand (see the message below).
+if [ "$LOCAL_DB" = 1 ]; then
+  MSSQL_IMG="mcr.microsoft.com/mssql/server:2022-latest"
+  if ! $SUDO $ENGINE image inspect "$MSSQL_IMG" >/dev/null 2>&1; then
+    MSSQL_TAR="$(ls "$HOME"/mssql*.tar.gz "$(pwd)"/mssql*.tar.gz "$(pwd)"/../mssql*.tar.gz 2>/dev/null | head -n1 || true)"
+    if [ -n "$MSSQL_TAR" ]; then
+      echo "Loading the SQL Server image from $MSSQL_TAR (takes a minute)"
+      gzip -dc "$MSSQL_TAR" | $SUDO $ENGINE load
+    else
+      echo "Pulling $MSSQL_IMG from Microsoft's registry..."
+      $SUDO $ENGINE pull "$MSSQL_IMG" || fail "Cannot get the SQL Server image. On a PC that can reach it run:
+    docker pull $MSSQL_IMG && docker save $MSSQL_IMG | gzip > mssql.tar.gz
+  copy mssql.tar.gz to this server's home folder (~), then run deploy.sh again.
+  (Or use your Windows SQL Server instead:  AMLI_DB_MODE=external AMLI_DB_PASSWORD='...' bash deploy.sh)"
+    fi
+  fi
+fi
 if images_present; then
   echo "Pre-built AMLI images found - skipping the build."
 else
