@@ -1,0 +1,85 @@
+# ==========================================
+# CISO ASSISTANT - ROOT .GITIGNORE
+# ==========================================
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+!.env.localdb.example
+cli/.mcp.env
+**/charts/*/custom-values.yaml
+**/charts/*/custom.yaml
+django_secret_key
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.db
+secrets/
+credentials/
+
+# Python / Django
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+ENV/
+env/
+backend/profiles/
+backend/ciso_assistant/.meta
+backend/db/
+db/
+**/.meta
+*.sqlite3
+db/*.sqlite3
+db/huey.db
+db/caddy/
+temp/
+cli/db_backup
+
+# Node / Frontend / SvelteKit
+**/node_modules/
+.svelte-kit/
+build/
+**/dist/
+.vite/
+frontend/src/paraglide/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+frontend/project.inlang/cache
+
+# Logs & Temporary Test/Build Artifacts
+*.log
+logs/
+*.pdf
+test-results/
+coverage/
+.dccache
+
+# OS & IDE Configuration
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.history/
+*~$*
+
+# Claude / Assistant Settings (keep shared skills tracked)
+/.claude/*
+!/.claude/skills/
+
+# Local Dev Windows Scripts
+backend.ps1
+backend/.win_native_dev_runserver.py
+tools/convert_library_v2.bat

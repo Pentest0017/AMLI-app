@@ -1,0 +1,189 @@
+import { env } from '$env/dynamic/public';
+import { m } from '$paraglide/messages';
+
+const rawBackendApiUrl = Object.hasOwn(env, 'PUBLIC_BACKEND_API_URL')
+	? env.PUBLIC_BACKEND_API_URL
+	: 'http://localhost:8000/api';
+
+// Strip default ports so this matches request.url in handleFetch's startsWith check (issue #4422).
+export const BASE_API_URL = (() => {
+	try {
+		return new URL(rawBackendApiUrl).href.replace(/\/$/, '');
+	} catch {
+		return rawBackendApiUrl;
+	}
+})();
+
+export const DEFAULT_LANGUAGE = `${
+	Object.hasOwn(env, 'PUBLIC_DEFAULT_LANGUAGE') ? env.PUBLIC_DEFAULT_LANGUAGE : 'en'
+}`;
+
+export const ALLAUTH_API_URL = `${BASE_API_URL}/_allauth/app/v1`;
+
+export const BACKEND_API_EXPOSED_URL = `${
+	Object.hasOwn(env, 'PUBLIC_BACKEND_API_EXPOSED_URL')
+		? env.PUBLIC_BACKEND_API_EXPOSED_URL
+		: BASE_API_URL
+}`;
+
+export const complianceResultColorMap: { [key: string]: string } = {
+	not_assessed: '#d1d5db',
+	partially_compliant: '#fde047',
+	non_compliant: '#f87171',
+	compliant: '#86efac',
+	not_applicable: '#000000'
+};
+
+export const complianceResultTailwindColorMap: { [key: string]: string } = {
+	not_assessed: 'bg-surface-300-700',
+	partially_compliant: 'bg-yellow-300 dark:bg-yellow-600',
+	non_compliant: 'bg-red-300 dark:bg-red-800',
+	compliant: 'bg-green-300 dark:bg-green-700',
+	not_applicable: 'bg-black text-white'
+};
+
+export const complianceStatusColorMap: { [key: string]: string } = {
+	to_do: '#9ca3af',
+	in_progress: '#f59e0b',
+	in_review: '#3b82f6',
+	done: '#86efac'
+};
+
+export const complianceStatusTailwindColorMap = {
+	to_do: 'bg-surface-400-600',
+	in_progress: 'bg-amber-500 dark:bg-amber-600',
+	in_review: 'bg-blue-500',
+	done: 'bg-green-300 dark:bg-green-700'
+};
+
+export const extendedResultColorMap: { [key: string]: string } = {
+	not_set: '#d1d5db',
+	major_nonconformity: '#dc2626',
+	minor_nonconformity: '#f97316',
+	observation: '#eab308',
+	opportunity_for_improvement: '#3b82f6',
+	good_practice: '#22c55e'
+};
+
+// Semantic color map used by dashboard breakdown widgets (pie/donut/bar/table).
+// Keys are lowercased and matched verbatim against breakdown keys returned by the backend.
+// When a breakdown key is not found here, the chart falls back to DEFAULT_BREAKDOWN_PALETTE.
+export const breakdownSemanticColorMap: { [key: string]: string } = {
+	// Compliance results
+	not_assessed: '#d1d5db',
+	partially_compliant: '#fde047',
+	non_compliant: '#f87171',
+	compliant: '#86efac',
+	not_applicable: '#1f2937',
+	// Compliance / task / generic statuses
+	to_do: '#9ca3af',
+	in_progress: '#f59e0b',
+	in_review: '#3b82f6',
+	done: '#86efac',
+	// Severity (findings, incidents, vulnerabilities, exceptions)
+	critical: '#dc2626',
+	high: '#ea580c',
+	medium: '#ca8a04',
+	low: '#2563eb',
+	info: '#64748b',
+	undefined: '#475569',
+	// Risk treatment
+	open: '#9ca3af',
+	mitigate: '#3b82f6',
+	accept: '#fde047',
+	avoid: '#a855f7',
+	transfer: '#06b6d4',
+	// Extended results (audits)
+	major_nonconformity: '#dc2626',
+	minor_nonconformity: '#f97316',
+	observation: '#eab308',
+	opportunity_for_improvement: '#3b82f6',
+	good_practice: '#22c55e'
+};
+
+// Fallback palette for breakdown keys not in breakdownSemanticColorMap.
+// Picked for color-blind friendliness and reasonable contrast against light backgrounds.
+export const DEFAULT_BREAKDOWN_PALETTE: string[] = [
+	'#3b82f6',
+	'#a855f7',
+	'#22c55e',
+	'#f97316',
+	'#eab308',
+	'#06b6d4',
+	'#ec4899',
+	'#84cc16',
+	'#0ea5e9',
+	'#f43f5e',
+	'#8b5cf6',
+	'#14b8a6'
+];
+
+export function resolveBreakdownColor(key: string, index = 0): string {
+	if (!key) return DEFAULT_BREAKDOWN_PALETTE[index % DEFAULT_BREAKDOWN_PALETTE.length];
+	const normalized = String(key).toLowerCase().trim();
+	if (normalized in breakdownSemanticColorMap) {
+		return breakdownSemanticColorMap[normalized];
+	}
+	return DEFAULT_BREAKDOWN_PALETTE[index % DEFAULT_BREAKDOWN_PALETTE.length];
+}
+
+export const MONTH_LIST = [
+	'January',
+	'February',
+	'March',
+	'April',
+	'May',
+	'June',
+	'July',
+	'August',
+	'September',
+	'October',
+	'November',
+	'December'
+];
+
+export const TODAY = new Date();
+
+export const UUID_REGEX = '([0-9a-f]{8}\\-[0-9a-f]{4}\\-[0-9a-f]{4}\\-[0-9a-f]{4}\\-[0-9a-f]{12})';
+export const UUID_LIST_REGEX = new RegExp(`^${UUID_REGEX}(,${UUID_REGEX})*$`);
+
+export const URN_REGEX =
+	/^urn:([a-zA-Z0-9_-]+):([a-zA-Z0-9_-]+):([a-zA-Z0-9_-]+)(?::([a-zA-Z0-9_-]+))?:([0-9A-Za-z\[\]\(\)\-\._:]+)$/;
+
+export const LOCALE_DISPLAY_MAP = {
+	en: '🇬🇧 English',
+	fr: '🇫🇷 Français',
+	de: '🇩🇪 Deutsch',
+	es: '🇪🇸 Español',
+	it: '🇮🇹 Italiano',
+	nl: '🇳🇱 Nederlands',
+	pt: '🇵🇹 Português',
+	pl: '🇵🇱 Polski',
+	ro: '🇷🇴 Română',
+	ar: '🇸🇦 العربية',
+	cs: '🇨🇿 Český',
+	sv: '🇸🇪 Svenska',
+	id: '🇮🇩 Bahasa Indonesia',
+	da: '🇩🇰 Dansk',
+	uk: '🇺🇦 Українська',
+	el: '🇬🇷 Ελληνικά',
+	tr: '🇹🇷 Türkçe',
+	hr: '🇭🇷 Hrvatski',
+	zh: '🇨🇳 简体中文',
+	lt: '🇱🇹 Lietuvių',
+	ko: '🇰🇷 한국어',
+	et: '🇪🇪 Eesti',
+	sk: '🇸🇰 Slovenčina'
+};
+
+export const ISO_8601_REGEX =
+	/^([+-]?\d{4}(?!\d{2}\b))((-?)((0[1-9]|1[0-2])(\3([12]\d|0[1-9]|3[01]))?|W([0-4]\d|5[0-2])(-?[1-7])?|(00[1-9]|0[1-9]\d|[12]\d{2}|3([0-5]\d|6[1-6])))([T\s]((([01]\d|2[0-3])((:?)[0-5]\d)?|24:?00)([.,]\d+(?!:))?)?(\17[0-5]\d([.,]\d+)?)?([zZ]|([+-])([01]\d|2[0-3]):?([0-5]\d)?)?)?)?$/;
+
+export const SECURITY_OBJECTIVE_SCALE_MAP = {
+	'1-3': ['1', '2', '3', '3', '3'],
+	'0-3': ['0', '1', '2', '3', '3'],
+	'0-4': ['0', '1', '2', '3', '4'],
+	'1-4': ['1', '2', '3', '4', '4'],
+	'1-5': ['1', '2', '3', '4', '5'],
+	'FIPS-199': ['low', 'moderate', 'moderate', 'high', 'high']
+};

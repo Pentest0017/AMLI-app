@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# One-click deploy for AMLI on a CLI-only Linux server (Docker or Podman).
+# Usage:  chmod +x deploy.sh && ./deploy.sh
+#
+# Database modes (picked automatically from DB_HOST in .env):
+#   DB_HOST=db            -> SQL Server runs in a container on this same server (easiest)
+#   DB_HOST=<ip/hostname> -> external SQL Server (e.g. the Windows DB server)
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
+say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
+fail() { printf '\n\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
+
+# ---- 1. Container engine + compose provider --------------------------------
+say "1/7 Detecting container engine"
+if   command -v docker >/dev/null 2>&1; then ENGINE=docker
+elif command -v podman >/dev/null 2>&1; then ENGINE=podman
+else fail "Neither docker nor podman found"; fi
+
+IS_PODMAN=0
+$ENGINE --version 2>&1 | grep -qi podman && IS_PODMAN=1
+
+SUDO=""
+if ! $ENGINE info >/dev/null 2>&1; then
+  if sudo -n true 2>/dev/null; then SUDO="sudo"; else fail "Cannot talk to $ENGINE (permission denied?). Add your user to the docker group or run with sudo."; fi
+  $SUDO $ENGINE info >/dev/null 2>&1 || fail "$ENGINE is not running"
+fi
+
+if [ "$IS_PODMAN" = 1 ] && [ -x /usr/local/bin/docker-compose ]; then
+  # Installed by AMLI-prereqs: standalone docker-compose talking to the Podman socket
+  if [ -n "$SUDO" ] || [ "$(id -u)" = 0 ]; then export DOCKER_HOST="unix:///run/podman/podman.sock"
+  else export DOCKER_HOST="unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"; fi
+  [ -S "${DOCKER_HOST#unix://}" ] || fail "Podman socket not found at ${DOCKER_HOST#unix://}. Run: systemctl --user enable --now podman.socket (or re-run AMLI-prereqs/install-prereqs.sh)"
+  COMPOSE="$SUDO /usr/local/bin/docker-compose"
+elif $SUDO $ENGINE compose version >/dev/null 2>&1; then COMPOSE="$SUDO $ENGINE compose"
+elif command -v docker-compose >/dev/null 2>&1;     then COMPOSE="$SUDO docker-compose"
+elif command -v podman-compose >/dev/null 2>&1;     then COMPOSE="$SUDO podman-compose"
+else fail "No compose provider found. Install docker-compose (v2) or podman-compose."; fi
+
+ROOTLESS=0
+if [ "$IS_PODMAN" = 1 ] && [ -z "$SUDO" ] && [ "$(id -u)" != 0 ]; then ROOTLESS=1; fi
+echo "engine=$ENGINE podman=$IS_PODMAN rootless=$ROOTLESS compose='$COMPOSE'"
+
+# ---- 2. .env checks ---------------------------------------------------------
+say "2/7 Checking .env"
+if [ ! -f .env ]; then
+  [ -f .env.localdb.example ] || fail "Neither .env nor .env.localdb.example found in $(pwd)"
+  echo "No .env found: creating it from .env.localdb.example (all-in-one, database in a container)"
+  HOST_IP="${AMLI_HOST:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
+  [ -n "$HOST_IP" ] || HOST_IP="localhost"
+  rand() { head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c "$1"; }
+  SECRET_KEY_GEN="$(rand 64)"
+  DB_PW_GEN="Isg$(rand 16)Aa1!"
+  cp .env.localdb.example .env
+  sed -i -e "s|__HOST__|${HOST_IP}|g" -e "s|__SECRET_KEY__|${SECRET_KEY_GEN}|" -e "s|__DB_PASSWORD__|${DB_PW_GEN}|g" .env
+  chmod 600 .env
+  echo "Server address set to ${HOST_IP} (override with: AMLI_HOST=<ip-or-name> bash deploy.sh)"
+fi
+GENERATED_ADMIN_PW=""
+if grep -q '^CISO_ASSISTANT_SUPERUSER_PASSWORD=CHANGE_ME_ADMIN_PASSWORD' .env; then
+  GENERATED_ADMIN_PW="$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 14)#9Aa"
+  sed -i "s|^CISO_ASSISTANT_SUPERUSER_PASSWORD=CHANGE_ME_ADMIN_PASSWORD|CISO_ASSISTANT_SUPERUSER_PASSWORD=${GENERATED_ADMIN_PW}|" .env
+  echo "Generated a random admin password (shown at the end)."
+fi
+if grep -q 'CHANGE_ME' .env; then
+  grep -n 'CHANGE_ME' .env
+  fail "Replace the CHANGE_ME values in .env first"
+fi
+envval() { grep -E "^$1=" .env | head -n1 | cut -d= -f2- | sed -e "s/^['\"]//" -e "s/['\"]$//"; }
+DB_HOST="$(envval DB_HOST)"; DB_PORT="$(envval DB_PORT)"; URL="$(envval CISO_ASSISTANT_URL)"
+
+LOCAL_DB=0; [ "$DB_HOST" = "db" ] && LOCAL_DB=1
+if [ "$LOCAL_DB" = 1 ]; then
+  echo "Database mode: local container (DB_HOST=db)"
+else
+  say "Checking external database reachability (${DB_HOST}:${DB_PORT})"
+  timeout 5 bash -c "exec 3<>/dev/tcp/${DB_HOST}/${DB_PORT}" 2>/dev/null \
+    || fail "Cannot reach ${DB_HOST}:${DB_PORT}. Ask the DB team to allow this server through the firewall and enable SQL Server TCP/IP."
+  echo "Database port is reachable."
+fi
+
+# ---- 3. Data directory permissions -----------------------------------------
+say "3/7 Preparing data directory"
+mkdir -p db
+if [ "$ROOTLESS" = 1 ]; then
+  podman unshare chown -R 1001:1001 db
+else
+  chown -R 1001:1001 db 2>/dev/null || sudo chown -R 1001:1001 db
+fi
+if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" = "Enforcing" ]; then
+  echo "SELinux is enforcing: labelling ./db for containers"
+  chcon -R -t container_file_t db 2>/dev/null || sudo chcon -R -t container_file_t db
+fi
+
+# ---- 4. Build ---------------------------------------------------------------
+say "4/7 Building images (first time takes several minutes)"
+if $SUDO $ENGINE image inspect localhost/amli-backend:local >/dev/null 2>&1 && $SUDO $ENGINE image inspect localhost/amli-frontend:local >/dev/null 2>&1; then
+  echo "Pre-built AMLI images found - skipping the build."
+else
+  $COMPOSE build
+fi
+
+wait_healthy() { # name, tries
+  local name="$1" tries="${2:-60}" st
+  for i in $(seq 1 "$tries"); do
+    st="$($SUDO $ENGINE inspect -f '{{.State.Health.Status}}' "$name" 2>/dev/null || true)"
+    [ -z "$st" ] && st="$($SUDO $ENGINE inspect -f '{{.State.Healthcheck.Status}}' "$name" 2>/dev/null || true)"
+    [ "$st" = "healthy" ] && return 0
+    sleep 10
+  done
+  $SUDO $ENGINE logs --tail 60 "$name" || true
+  fail "$name did not become healthy"
+}
+
+# ---- 5. Start services in stages -------------------------------------------
+say "5/7 Starting services"
+if [ "$LOCAL_DB" = 1 ]; then
+  $COMPOSE up -d --no-deps db mailhog qdrant
+  echo "Waiting for database container..."
+  wait_healthy db 60
+else
+  $COMPOSE up -d --no-deps mailhog qdrant
+fi
+$COMPOSE up -d --no-deps backend
+echo "Waiting for backend (first start can take a few minutes)..."
+wait_healthy backend 60
+$COMPOSE up -d --no-deps huey frontend caddy
+
+# ---- 6. Migrate -------------------------------------------------------------
+say "6/7 Running database migrations"
+$SUDO $ENGINE exec backend python manage.py migrate --noinput
+
+# ---- 7. Summary -------------------------------------------------------------
+say "7/7 Done"
+$COMPOSE ps
+echo
+echo "AMLI is running at: ${URL}"
+echo "Admin login:  $(envval CISO_ASSISTANT_SUPERUSER_EMAIL)"
+if [ -n "$GENERATED_ADMIN_PW" ]; then echo "Admin password: ${GENERATED_ADMIN_PW}   (also saved in .env - change it after first login)"; fi
+echo "(Browser will warn about the self-signed certificate; this is expected.)"
+echo "Make sure port 8443/tcp is open in the server firewall, e.g.:"
+echo "  sudo firewall-cmd --permanent --add-port=8443/tcp && sudo firewall-cmd --reload"
+echo "Logs:  $ENGINE logs -f backend"

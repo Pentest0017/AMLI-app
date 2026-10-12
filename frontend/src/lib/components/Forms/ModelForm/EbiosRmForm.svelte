@@ -1,0 +1,267 @@
+<script lang="ts">
+	import type { SuperValidated } from 'sveltekit-superforms';
+	import type { ModelInfo, CacheLock } from '$lib/utils/types';
+	import TextField from '$lib/components/Forms/TextField.svelte';
+	import AutocompleteSelect from '$lib/components/Forms/AutocompleteSelect.svelte';
+	import FolderTreeSelect from '$lib/components/Forms/FolderTreeSelect.svelte';
+	import { m } from '$paraglide/messages';
+	import MarkdownField from '$lib/components/Forms/MarkdownField.svelte';
+	import Select from '$lib/components/Forms/Select.svelte';
+	import { page } from '$app/state';
+	import { onMount } from 'svelte';
+
+	interface Props {
+		form: SuperValidated<any>;
+		model: ModelInfo;
+		cacheLocks?: Record<string, CacheLock>;
+		formDataCache?: Record<string, any>;
+		initialData?: Record<string, any>;
+		context: string;
+		[key: string]: any;
+	}
+
+	let {
+		form,
+		model,
+		cacheLocks = {},
+		formDataCache = $bindable({}),
+		initialData = {},
+		context,
+		...rest
+	}: Props = $props();
+
+	let activeActivity: string | null = $state(null);
+	let hasEntities = $state(false);
+
+	onMount(() => {
+		fetch('/entities?limit=1')
+			.then((r) => r.json())
+			.then((data) => {
+				hasEntities = (data.count ?? 0) > 0;
+			})
+			.catch(() => {});
+	});
+
+	page.url.searchParams.forEach((value, key) => {
+		if (key === 'activity' && value === 'one') {
+			activeActivity = 'one';
+		} else if (key === 'activity' && value === 'two') {
+			activeActivity = 'two';
+		}
+	});
+</script>
+
+{#if context !== 'ebiosRmStudy' && context !== 'selectAudit' && context !== 'selectAsset'}
+	<TextField
+		{form}
+		field="version"
+		label={m.version()}
+		cacheLock={cacheLocks['version']}
+		bind:cachedValue={formDataCache['version']}
+	/>
+	<Select
+		{form}
+		options={model.selectOptions['quotation_method']}
+		field="quotation_method"
+		disableDoubleDash
+		label={m.quotationMethod()}
+		cacheLock={cacheLocks['quotation_method']}
+		bind:cachedValue={formDataCache['quotation_method']}
+	/>
+	<Select
+		{form}
+		options={model.selectOptions['status']}
+		field="status"
+		label={m.status()}
+		cacheLock={cacheLocks['status']}
+		bind:cachedValue={formDataCache['status']}
+	/>
+	{#if hasEntities}
+		<AutocompleteSelect
+			{form}
+			optionsEndpoint="entities"
+			field="reference_entity"
+			cacheLock={cacheLocks['reference_entity']}
+			bind:cachedValue={formDataCache['reference_entity']}
+			label={m.referenceEntity()}
+		/>
+	{/if}
+	<AutocompleteSelect
+		{form}
+		optionsEndpoint="risk-matrices?is_enabled=true"
+		field="risk_matrix"
+		cacheLock={cacheLocks['risk_matrix']}
+		bind:cachedValue={formDataCache['risk_matrix']}
+		label={m.riskMatrix()}
+		helpText={m.ebiosRmMatrixHelpText()}
+	/>
+{:else if context === 'ebiosRmStudy'}
+	<div
+		class="relative p-2 space-y-2 rounded-md {activeActivity === 'one'
+			? 'border-2 border-primary-500'
+			: 'border-2 border-surface-300-700 border-dashed'}"
+	>
+		<p
+			class="absolute -top-3 bg-surface-50-950 font-bold {activeActivity === 'one'
+				? 'text-primary-500'
+				: 'text-surface-600-400'}"
+		>
+			{m.activityOne()}
+		</p>
+		<FolderTreeSelect
+			{form}
+			field="folder"
+			label={m.domain()}
+			cacheLock={cacheLocks['folder']}
+			bind:cachedValue={formDataCache['folder']}
+			helpText={m.ebiosRmStudyDomainHelpText()}
+		/>
+		<Select
+			{form}
+			options={model.selectOptions['status']}
+			field="status"
+			label={m.status()}
+			cacheLock={cacheLocks['status']}
+			bind:cachedValue={formDataCache['status']}
+		/>
+		<AutocompleteSelect
+			{form}
+			optionsEndpoint="risk-matrices?is_enabled=true"
+			field="risk_matrix"
+			cacheLock={cacheLocks['risk_matrix']}
+			bind:cachedValue={formDataCache['risk_matrix']}
+			label={m.riskMatrix()}
+			helpText={m.ebiosRmMatrixHelpText() + '\n' + m.riskAssessmentMatrixHelpText()}
+		/>
+		<TextField
+			{form}
+			field="version"
+			label={m.version()}
+			cacheLock={cacheLocks['version']}
+			bind:cachedValue={formDataCache['version']}
+		/>
+		<Select
+			{form}
+			options={model.selectOptions['quotation_method']}
+			field="quotation_method"
+			disableDoubleDash
+			label={m.quotationMethod()}
+			cacheLock={cacheLocks['quotation_method']}
+			bind:cachedValue={formDataCache['quotation_method']}
+		/>
+		{#if hasEntities}
+			<AutocompleteSelect
+				{form}
+				optionsEndpoint="entities"
+				field="reference_entity"
+				cacheLock={cacheLocks['reference_entity']}
+				bind:cachedValue={formDataCache['reference_entity']}
+				label={m.referenceEntity()}
+			/>
+		{/if}
+		<AutocompleteSelect
+			multiple
+			{form}
+			optionsEndpoint="actors"
+			optionsLabelField="str"
+			optionsInfoFields={{
+				fields: [{ field: 'type', translate: true }],
+				position: 'prefix'
+			}}
+			field="authors"
+			cacheLock={cacheLocks['authors']}
+			bind:cachedValue={formDataCache['authors']}
+			label={m.authors()}
+		/>
+		<AutocompleteSelect
+			multiple
+			{form}
+			optionsEndpoint="actors"
+			optionsLabelField="str"
+			optionsInfoFields={{
+				fields: [{ field: 'type', translate: true }],
+				position: 'prefix'
+			}}
+			field="reviewers"
+			cacheLock={cacheLocks['reviewers']}
+			bind:cachedValue={formDataCache['reviewers']}
+			label={m.reviewers()}
+		/>
+	</div>
+	<div
+		class="relative p-2 space-y-2 rounded-md {activeActivity === 'two'
+			? 'border-2 border-primary-500'
+			: 'border-2 border-surface-300-700 border-dashed'}"
+	>
+		<p
+			class="absolute -top-3 bg-surface-50-950 font-bold {activeActivity === 'two'
+				? 'text-primary-500'
+				: 'text-surface-600-400'}"
+		>
+			{m.activityTwo()}
+		</p>
+		<AutocompleteSelect
+			multiple
+			{form}
+			optionsEndpoint="assets"
+			optionsLabelField="auto"
+			optionsExtraFields={[['folder', 'str']]}
+			optionsDetailedUrlParameters={[
+				rest?.scopeFolder?.id ? ['scope_folder_id', rest.scopeFolder.id] : ['', undefined]
+			]}
+			optionsInfoFields={{
+				fields: [
+					{
+						field: 'type'
+					}
+				],
+				classes: 'text-blue-500'
+			}}
+			field="assets"
+			label={m.assets()}
+			helpText={m.studyAssetHelpText()}
+		/>
+	</div>
+	<MarkdownField
+		{form}
+		field="observation"
+		label={m.observation()}
+		cacheLock={cacheLocks['observation']}
+		bind:cachedValue={formDataCache['observation']}
+	/>
+{:else if context === 'selectAudit'}
+	<AutocompleteSelect
+		multiple
+		{form}
+		optionsEndpoint="compliance-assessments"
+		optionsExtraFields={[['folder', 'str']]}
+		optionsLabelField="auto"
+		field="compliance_assessments"
+		cacheLock={cacheLocks['compliance_assessments']}
+		bind:cachedValue={formDataCache['compliance_assessments']}
+		label={m.complianceAssessment()}
+	/>
+{:else if context === 'selectAsset'}
+	<AutocompleteSelect
+		multiple
+		{form}
+		optionsEndpoint="assets"
+		optionsExtraFields={[['folder', 'str']]}
+		optionsDetailedUrlParameters={[
+			rest?.scopeFolder?.id ? ['scope_folder_id', rest.scopeFolder.id] : ['', undefined]
+		]}
+		optionsInfoFields={{
+			fields: [
+				{
+					field: 'type'
+				}
+			],
+			classes: 'text-blue-500'
+		}}
+		optionsLabelField="auto"
+		field="assets"
+		cacheLock={cacheLocks['assets']}
+		bind:cachedValue={formDataCache['assets']}
+		label={m.assets()}
+	/>
+{/if}

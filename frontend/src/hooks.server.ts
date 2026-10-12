@@ -1,0 +1,332 @@
+import { BASE_API_URL, DEFAULT_LANGUAGE } from '$lib/utils/constants';
+import { safeTranslate } from '$lib/utils/i18n';
+import type { User } from '$lib/utils/types';
+import { redirect, type Handle, type HandleFetch, type RequestEvent } from '@sveltejs/kit';
+import { setFlash } from 'sveltekit-flash-message/server';
+
+import { loadFeatureFlags } from '$lib/feature-flags';
+import { logger, installJsonConsole } from '$lib/server/logger';
+import { paraglideMiddleware } from '$paraglide/server';
+import { defineCustomServerStrategy } from '$paraglide/runtime';
+
+// Runs once at server start. When LOG_FORMAT=json, routes the whole SSR stdout
+// stream (including not-yet-migrated console.* call sites) through JSON output.
+installJsonConsole();
+
+const fallbackLocaleStore = new WeakMap<Request, string>();
+
+defineCustomServerStrategy('custom-fallback', {
+	getLocale: (request) => fallbackLocaleStore.get(request) ?? DEFAULT_LANGUAGE
+});
+
+const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
+
+async function fetchWithRetry(
+	url: string,
+	init?: RequestInit,
+	retries = 3,
+	delay = 1000,
+	timeoutMs = 5000
+): Promise<Response> {
+	for (let attempt = 0; attempt < retries; attempt++) {
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), timeoutMs);
+		try {
+			const response = await fetch(url, { ...init, signal: controller.signal });
+			clearTimeout(timer);
+			if (response.ok || !RETRYABLE_STATUSES.has(response.status) || attempt === retries - 1) {
+				return response;
+			}
+		} catch (error) {
+			clearTimeout(timer);
+			if (attempt === retries - 1) throw error;
+		}
+		await new Promise((r) => setTimeout(r, delay * (attempt + 1)));
+	}
+	throw new Error('unreachable');
+}
+
+async function fetchDefaultLanguage(): Promise<string> {
+	try {
+		const response = await fetchWithRetry(`${BASE_API_URL}/settings/general/default-language/`, {
+			headers: { 'content-type': 'application/json' }
+		});
+		if (response.ok) {
+			const data = await response.json();
+			const language = data?.default_language;
+			if (typeof language === 'string' && language.length > 0) return language;
+		}
+	} catch (error) {
+		logger.error('Unable to fetch default language', { error });
+	}
+	return DEFAULT_LANGUAGE;
+}
+
+async function ensureDefaultLocale(event: RequestEvent): Promise<string> {
+	const existingLocale = event.cookies.get('LOCALE');
+	if (existingLocale) return existingLocale;
+
+	const locale = await fetchDefaultLanguage();
+	setLocaleCookie(event, locale);
+	return locale;
+}
+
+function setLocaleCookie(event: RequestEvent, locale: string) {
+	event.cookies.set('LOCALE', locale, {
+		httpOnly: false,
+		sameSite: 'lax',
+		path: '/',
+		secure: true
+	});
+}
+
+function applyUserLocale(event: RequestEvent, user: User | undefined) {
+	const preferredLanguage = user?.preferences?.lang;
+	if (typeof preferredLanguage !== 'string' || preferredLanguage.length === 0) return;
+
+	setLocaleCookie(event, preferredLanguage);
+	fallbackLocaleStore.set(event.request, preferredLanguage);
+}
+
+async function ensureCsrfToken(event: RequestEvent): Promise<string> {
+	let csrfToken = event.cookies.get('csrftoken') || '';
+	if (!csrfToken) {
+		try {
+			const response = await fetchWithRetry(`${BASE_API_URL}/csrf/`, {
+				credentials: 'include',
+				headers: { 'content-type': 'application/json' }
+			});
+			if (!response.ok) {
+				logger.error('CSRF endpoint returned an error status', {
+					status: response.status
+				});
+				return csrfToken;
+			}
+			const data = await response.json();
+			const token = data?.csrfToken;
+			if (typeof token !== 'string' || token.length === 0) {
+				logger.error('CSRF endpoint returned an invalid token payload');
+				return csrfToken;
+			}
+			csrfToken = token;
+			event.cookies.set('csrftoken', csrfToken, {
+				httpOnly: false,
+				sameSite: 'lax',
+				path: '/',
+				secure: true
+			});
+		} catch (error) {
+			logger.error('Unable to fetch CSRF token', { error });
+		}
+	}
+	return csrfToken;
+}
+
+function logoutUser(event: RequestEvent) {
+	event.cookies.delete('token', {
+		path: '/'
+	});
+	const allauthSessionToken = event.cookies.get('allauth_session_token');
+	if (allauthSessionToken) {
+		event.cookies.delete('allauth_session_token', { path: '/' });
+	}
+	redirect(302, `/login?next=${event.url.pathname}`);
+}
+
+async function validateUserSession(event: RequestEvent): Promise<User | null> {
+	const token = event.cookies.get('token');
+	if (!token) return null;
+
+	const res = await fetch(`${BASE_API_URL}/iam/current-user/`, {
+		credentials: 'include',
+		headers: {
+			'content-type': 'application/json',
+			Authorization: `Token ${token}`
+		}
+	});
+
+	if (!res.ok) logoutUser(event);
+
+	return res.json();
+}
+
+export const handle: Handle = async ({ event, resolve }) => {
+	const localeForRequest = await ensureDefaultLocale(event);
+	fallbackLocaleStore.set(event.request, localeForRequest);
+
+	return paraglideMiddleware(event.request, async ({ request: localizedRequest, locale }) => {
+		event.request = localizedRequest;
+
+		event.locals.featureFlags = loadFeatureFlags();
+
+		await ensureCsrfToken(event);
+
+		if (event.locals.user) {
+			applyUserLocale(event, event.locals.user);
+			return await resolve(event, {
+				transformPageChunk: ({ html }) => {
+					return html
+						.replace('%lang%', locale)
+						.replace('%theme%', event.locals.user?.preferences?.ui?.theme ?? '');
+				}
+			});
+		}
+
+		const errorId = new URL(event.request.url).searchParams.get('error');
+		if (errorId) {
+			setFlash({ type: 'error', message: safeTranslate(errorId) }, event);
+			redirect(302, '/login');
+		}
+
+		// Skip session validation for SSO authenticate route — the token cookie
+		// has just been set by the backend but the allauth session token hasn't
+		// been fetched yet; that happens in the page's load function.
+		const isSSOAuthenticate = event.url.pathname.endsWith('/sso/authenticate');
+
+		const user = isSSOAuthenticate ? null : await validateUserSession(event);
+		if (user) {
+			event.locals.user = user;
+			applyUserLocale(event, user);
+			const generalSettings = await fetch(`${BASE_API_URL}/settings/general/object/`, {
+				credentials: 'include',
+				headers: {
+					'content-type': 'application/json',
+					Authorization: `Token ${event.cookies.get('token')}`
+				}
+			});
+			event.locals.settings = await generalSettings.json();
+
+			const featureFlagSettings = await fetch(`${BASE_API_URL}/settings/feature-flags/`, {
+				credentials: 'include',
+				headers: {
+					'content-type': 'application/json',
+					Authorization: `Token ${event.cookies.get('token')}`
+				}
+			});
+			try {
+				event.locals.featureflags = await featureFlagSettings.json();
+			} catch (e) {
+				logger.error('Error fetching feature flags', { error: e });
+				event.locals.featureflags = {};
+			}
+		}
+
+		return await resolve(event, {
+			transformPageChunk: ({ html }) => {
+				return html
+					.replace('%lang%', locale)
+					.replace('%theme%', event.locals.user?.preferences?.ui?.theme ?? '');
+			}
+		});
+	});
+};
+
+export const handleFetch: HandleFetch = async ({ request, fetch, event }) => {
+	const unsafeMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+	const currentLang =
+		event.locals.user?.preferences?.lang || event.cookies.get('LOCALE') || DEFAULT_LANGUAGE;
+
+	let targetUrl = request.url;
+	if (targetUrl.includes('/api/') && !targetUrl.startsWith(BASE_API_URL)) {
+		const apiPath = targetUrl.substring(targetUrl.indexOf('/api/') + 4);
+		targetUrl = `${BASE_API_URL}${apiPath}`;
+		request = new Request(targetUrl, request);
+	}
+
+	if (request.url.startsWith(BASE_API_URL)) {
+		request.headers.set('Connection', 'close');
+		// Default to JSON for unsafe methods unless Content-Type is already set or is multipart
+		const ct = request.headers.get('Content-Type') || '';
+		if ((!ct || ct.toLowerCase().includes('text/plain')) && unsafeMethods.has(request.method)) {
+			request.headers.set('Content-Type', 'application/json');
+		}
+		request.headers.set('Accept-Language', currentLang);
+
+		const token = event.cookies.get('token');
+		const csrfToken = event.cookies.get('csrftoken');
+		const sessionId = event.cookies.get('sessionid');
+
+		if (token && !request.headers.has('Authorization')) {
+			request.headers.set('Authorization', `Token ${token}`);
+		}
+
+		// Forward sessionid and csrftoken cookies to backend for SSR requests
+		const existingCookie = request.headers.get('Cookie') || '';
+		const extraCookies: string[] = [];
+		if (sessionId && !existingCookie.includes('sessionid=')) {
+			extraCookies.push(`sessionid=${sessionId}`);
+		}
+		if (csrfToken && !existingCookie.includes('csrftoken=')) {
+			extraCookies.push(`csrftoken=${csrfToken}`);
+		}
+		if (extraCookies.length > 0) {
+			request.headers.set(
+				'Cookie',
+				existingCookie ? `${existingCookie}; ${extraCookies.join('; ')}` : extraCookies.join('; ')
+			);
+		}
+
+		// Inject focus folder ID header from cookie
+		const focusFolderId = event.cookies.get('focus_folder_id');
+		const focusModeEnabled = event.locals.featureflags?.focus_mode ?? false;
+		if (focusFolderId && focusModeEnabled) {
+			request.headers.set('X-Focus-Folder-Id', focusFolderId);
+		}
+		if (unsafeMethods.has(request.method) && csrfToken) {
+			request.headers.set('X-CSRFToken', csrfToken);
+		}
+	}
+
+	if (request.url.startsWith(`${BASE_API_URL}/_allauth/app`)) {
+		const allauthSessionToken = event.cookies.get('allauth_session_token');
+		if (allauthSessionToken) {
+			request.headers.append('X-Session-Token', allauthSessionToken);
+		}
+		const response = await fetch(request);
+		const clonedResponse = response.clone();
+
+		// Session is invalid
+		if (clonedResponse.status === 410) logoutUser(event);
+
+		// Skip 401 interception for auth endpoints (/auth/login, /auth/2fa/authenticate, etc.)
+		// because 401 is an expected response during login/MFA flows (e.g. "MFA required").
+		// Only intercept 401 on account management endpoints (/account/...).
+		const isAuthEndpoint = request.url.includes('/_allauth/app/v1/auth/');
+
+		if (clonedResponse.status === 401 && request.method !== 'DELETE' && !isAuthEndpoint) {
+			try {
+				const data = await clonedResponse.json();
+				const reauthenticationFlows = ['reauthenticate', 'mfa_reauthenticate'];
+
+				if (!data.meta?.is_authenticated) {
+					// Allauth session has fully expired — force logout
+					logoutUser(event);
+				} else if (
+					data.data?.flows?.some((flow: Record<string, any>) =>
+						reauthenticationFlows.includes(flow.id)
+					)
+				) {
+					if (event.locals.user?.is_sso) {
+						// SSO users: don't log out — let the page handle the 401
+						// gracefully. Logging out forces a full IdP round-trip.
+					} else {
+						// Local users: log out so they can re-enter their password
+						// to refresh the session (temporary until proper reauth flow).
+						setFlash(
+							{ type: 'warning', message: safeTranslate('reauthenticateForSensitiveAction') },
+							event
+						);
+						logoutUser(event);
+					}
+				}
+			} catch {
+				// Malformed response — force logout to be safe
+				logoutUser(event);
+			}
+		}
+
+		return response;
+	}
+
+	return fetch(request);
+};

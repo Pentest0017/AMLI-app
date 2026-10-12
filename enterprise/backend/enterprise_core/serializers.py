@@ -1,0 +1,314 @@
+from django.conf import settings
+from global_settings.models import GlobalSettings
+from rest_framework import serializers
+from core.serializers import (
+    BaseModelSerializer,
+    FolderWriteSerializer as CommunityFolderWriteSerializer,
+    UserWriteSerializer as CommunityUserWriteSerializer,
+)
+from core.serializer_fields import FieldsRelatedField
+from iam.models import Folder, User, Role
+from iam.cache_builders import get_folder_path, CacheNotReadyError
+import uuid
+
+from global_settings.models import GlobalSettings
+from global_settings.serializers import (
+    FeatureFlagsSerializer as CommunityFeatureFlagSerializer,
+)
+
+from core.models import CustomEmailTemplate, CustomWordTemplate, CustomDocHtmlTemplate
+from .models import ClientSettings, LogEntryAction
+from auditlog.models import LogEntry
+from global_settings.serializers import (
+    FeatureFlagsSerializer as CommunityFeatureFlagSerializer,
+)
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+
+class FolderWriteSerializer(CommunityFolderWriteSerializer):
+    def validate_parent_folder(self, parent_folder):
+        """
+        Check that the folders graph will not contain cycles
+        """
+        parent_folder = super().validate_parent_folder(parent_folder)
+        if not self.instance:
+            return parent_folder
+        if parent_folder:
+            if (
+                parent_folder == self.instance
+                or parent_folder in self.instance.get_sub_folders()
+            ):
+                raise serializers.ValidationError(
+                    "errorFolderGraphMustNotContainCycles"
+                )
+        return parent_folder
+
+
+class RoleReadSerializer(BaseModelSerializer):
+    name = serializers.CharField(source="__str__")
+    permissions = serializers.SerializerMethodField()
+    folder = FieldsRelatedField()
+
+    class Meta:
+        model = Role
+        fields = "__all__"
+
+    def get_permissions(self, obj):
+        return [{"str": perm.codename} for perm in obj.permissions.all()]
+
+
+class RoleWriteSerializer(BaseModelSerializer):
+    class Meta:
+        model = Role
+        fields = "__all__"
+
+
+class EditorPermissionMixin:
+    @staticmethod
+    def check_editor_permissions(instance, group):
+        editor_prefixes = {"add_", "change_", "delete_"}
+        editors = User.get_editors()
+        seats = settings.LICENSE_SEATS
+
+        perms = [p for p in group.permissions if p not in User.NON_SEAT_PERMISSIONS]
+        if any(perm.startswith(prefix) for prefix in editor_prefixes for perm in perms):
+            logger.info("Adding editor permissions to user", user=instance, group=group)
+            if instance not in editors and len(editors) >= seats:
+                logger.error(
+                    "License seats exceeded, cannot add editor user groups to user",
+                    user=instance,
+                    seats=seats,
+                )
+                raise serializers.ValidationError(
+                    {"user_groups": "errorLicenseSeatsExceeded"}
+                )
+
+
+class UserWriteSerializer(CommunityUserWriteSerializer, EditorPermissionMixin):
+    def _update_user_groups(self, instance, validated_data):
+        if validated_data.get("user_groups"):
+            logger.info(
+                "Updating user groups",
+                user=instance,
+                groups=validated_data["user_groups"],
+            )
+            for group in validated_data["user_groups"]:
+                self.check_editor_permissions(instance, group)
+
+    def create(self, validated_data):
+        self._update_user_groups(None, validated_data)
+        return super().create(validated_data)
+
+    def update(self, instance: User, validated_data):
+        self._update_user_groups(instance, validated_data)
+        return super().update(instance, validated_data)
+
+    def partial_update(self, instance, validated_data):
+        self._update_user_groups(instance, validated_data)
+        return super().partial_update(instance, validated_data)
+
+
+class ClientSettingsWriteSerializer(BaseModelSerializer):
+    class Meta:
+        model = ClientSettings
+        exclude = ["is_published", "folder"]
+
+
+class ClientSettingsReadSerializer(BaseModelSerializer):
+    logo_hash = serializers.CharField()
+    favicon_hash = serializers.CharField()
+    logo = serializers.SerializerMethodField()
+    favicon = serializers.SerializerMethodField()
+    logo_mime_type = serializers.CharField()
+    favicon_mime_type = serializers.CharField()
+
+    def get_logo(self, obj):
+        if obj.logo:
+            return obj.logo.name.split("/")[-1]
+        return None
+
+    def get_favicon(self, obj):
+        if obj.favicon:
+            return obj.favicon.name.split("/")[-1]
+        return None
+
+    class Meta:
+        model = ClientSettings
+        exclude = ["is_published", "folder"]
+
+
+class LogEntrySerializer(serializers.ModelSerializer):
+    """
+    Serializer for the LogEntry model.
+    """
+
+    actor = serializers.SerializerMethodField(method_name="get_actor")
+    action = serializers.SerializerMethodField(method_name="get_action_display")
+    content_type = serializers.SerializerMethodField(method_name="get_content_type")
+    folder = serializers.SerializerMethodField(method_name="get_folder")
+
+    def get_action_display(self, obj):
+        return LogEntryAction(obj.action).to_string()
+
+    def get_actor(self, obj):
+        # actor/actor_email are native LogEntry columns populated by the auditlog
+        # middleware. They replaced the additional_data["user_email"] blob that the
+        # old post_save enrichment used to fill (removed in the audit-trail refactor).
+        return obj.actor_email or (obj.actor.email if obj.actor_id else None)
+
+    def get_folder(self, obj):
+        # additional_data now carries folder_id (the old enrichment stored a "folder"
+        # path string). Resolve it to the full path via the in-memory folders cache.
+        folder_id = (obj.additional_data or {}).get("folder_id")
+        if not folder_id:
+            return None
+        try:
+            path = get_folder_path(uuid.UUID(str(folder_id)))
+        except ValueError, KeyError, CacheNotReadyError:
+            return None
+        return "/".join(f.name for f in path) or None
+
+    def get_content_type(self, obj):
+        return obj.content_type.name
+
+    def to_representation(self, instance):
+        log_data = super().to_representation(instance)
+        content_type = log_data.get("content_type")
+        change_dict = log_data.get("changes", {})
+
+        if (
+            isinstance(change_dict, dict)
+            and content_type == "user"
+            and "password" in change_dict
+        ):
+            # We want to mask the password in the audit logs.
+            change_dict["password"] = ["[old password]", "[new password]"]
+
+        log_data["changes"] = change_dict
+        return log_data
+
+    class Meta:
+        model = LogEntry
+        fields = "__all__"
+        read_only_fields = ["id", "timestamp", "actor", "action", "changes_text"]
+
+
+class CustomEmailTemplateReadSerializer(BaseModelSerializer):
+    class Meta:
+        model = CustomEmailTemplate
+        fields = [
+            "id",
+            "folder",
+            "template_key",
+            "language",
+            "subject",
+            "body",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class CustomEmailTemplateWriteSerializer(BaseModelSerializer):
+    class Meta:
+        model = CustomEmailTemplate
+        fields = [
+            "id",
+            "template_key",
+            "language",
+            "subject",
+            "body",
+            "is_active",
+        ]
+        read_only_fields = ["id"]
+
+
+class CustomWordTemplateReadSerializer(BaseModelSerializer):
+    file = serializers.SerializerMethodField()
+
+    def get_file(self, obj):
+        if obj.file:
+            return obj.file.name.split("/")[-1]
+        return None
+
+    class Meta:
+        model = CustomWordTemplate
+        fields = [
+            "id",
+            "folder",
+            "template_key",
+            "language",
+            "file",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class CustomWordTemplateWriteSerializer(BaseModelSerializer):
+    class Meta:
+        model = CustomWordTemplate
+        fields = ["id", "template_key", "language", "is_active"]
+        read_only_fields = ["id"]
+
+
+class CustomDocHtmlTemplateReadSerializer(BaseModelSerializer):
+    file = serializers.SerializerMethodField()
+
+    def get_file(self, obj):
+        if obj.file:
+            return obj.file.name.split("/")[-1]
+        return None
+
+    class Meta:
+        model = CustomDocHtmlTemplate
+        fields = [
+            "id",
+            "folder",
+            "template_key",
+            "language",
+            "file",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class CustomDocHtmlTemplateWriteSerializer(BaseModelSerializer):
+    class Meta:
+        model = CustomDocHtmlTemplate
+        fields = ["id", "template_key", "language", "is_active"]
+        read_only_fields = ["id"]
+
+
+class FeatureFlagsSerializer(CommunityFeatureFlagSerializer):
+    """
+    Serializer for managing Feature Flags stored within the 'value' JSON field
+    of a GlobalSettings instance. Each flag is represented as an explicit
+    BooleanField, mapping directly to keys within the 'value' dictionary.
+    """
+
+    campaigns = serializers.BooleanField(
+        source="value.campaigns", required=False, default=True
+    )
+
+    focus_mode = serializers.BooleanField(
+        source="value.focus_mode", required=False, default=False
+    )
+
+    audit_log_forwarding = serializers.BooleanField(
+        source="value.audit_log_forwarding", required=False, default=False
+    )
+
+    custom_fields = serializers.BooleanField(
+        source="value.custom_fields", required=False, default=False
+    )
+
+    object_audit_trail = serializers.BooleanField(
+        source="value.object_audit_trail", required=False, default=True
+    )
+    idp_groups = serializers.BooleanField(
+        source="value.idp_groups", required=False, default=False
+    )

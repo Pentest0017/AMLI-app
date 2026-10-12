@@ -1,0 +1,1379 @@
+<script lang="ts">
+	import { run } from 'svelte/legacy';
+
+	import { page } from '$app/state';
+	import RecursiveTreeView from '$lib/components/TreeView/RecursiveTreeView.svelte';
+
+	import { onMount } from 'svelte';
+
+	import type { ModalComponent, ModalSettings, TreeViewNode } from '@skeletonlabs/skeleton-svelte';
+
+	import { Switch, Progress, Popover, Tooltip } from '@skeletonlabs/skeleton-svelte';
+
+	import { goto, invalidateAll } from '$app/navigation';
+
+	import {} from '@skeletonlabs/skeleton-svelte';
+	import type { ActionData, PageData } from './$types';
+	import TreeViewItemContent from './TreeViewItemContent.svelte';
+	import TreeViewItemLead from './TreeViewItemLead.svelte';
+
+	import Anchor from '$lib/components/Anchor/Anchor.svelte';
+	import AuditTrailButton from '$lib/components/AuditTrail/AuditTrailButton.svelte';
+	import CreateModal from '$lib/components/Modals/CreateModal.svelte';
+	import ExportModal, { type ExportGroup } from '$lib/components/Modals/ExportModal.svelte';
+
+	import {
+		complianceResultColorMap,
+		complianceStatusColorMap,
+		extendedResultColorMap
+	} from '$lib/utils/constants';
+
+	import DonutChart from '$lib/components/Chart/DonutChart.svelte';
+	import RingProgress from '$lib/components/DataViz/RingProgress.svelte';
+	import { URL_MODEL_MAP, getModelInfo } from '$lib/utils/crud';
+	import type { Node } from './types';
+
+	import { safeTranslate } from '$lib/utils/i18n';
+	import { m } from '$paraglide/messages';
+	import { formatDateOrDateTime } from '$lib/utils/datetime';
+	import { getLocale } from '$paraglide/runtime.js';
+
+	import List from '$lib/components/List/List.svelte';
+	import ConfirmModal from '$lib/components/Modals/ConfirmModal.svelte';
+	import SuggestControlsModal from '$lib/components/Modals/SuggestControlsModal.svelte';
+	import {
+		displayScoreColor,
+		darkenColor,
+		getScoreHexColor,
+		getFieldVisibility
+	} from '$lib/utils/helpers';
+	import { auditFiltersStore, expandedNodesState } from '$lib/utils/stores';
+	import TreeExpandCollapseToggle from '$lib/components/TreeView/TreeExpandCollapseToggle.svelte';
+	import { derived } from 'svelte/store';
+	import { canPerformAction } from '$lib/utils/access-control';
+	import MarkdownRenderer from '$lib/components/MarkdownRenderer.svelte';
+	import ValidationFlowsSection from '$lib/components/ValidationFlows/ValidationFlowsSection.svelte';
+	import { countMasked, isMaskedPlaceholder } from '$lib/utils/related-visibility';
+
+	const CYFUN_2025_FRAMEWORK_URN = 'urn:intuitem:risk:framework:ccb-cyfun2025';
+	const ISO27001_FRAMEWORK_URN_PREFIX = 'urn:intuitem:risk:framework:iso27001';
+
+	interface Props {
+		data: PageData;
+		form: ActionData;
+	}
+
+	let { data, form }: Props = $props();
+
+	const compliance_assessment = $derived(data.compliance_assessment);
+
+	const user = page.data.user;
+	const model = URL_MODEL_MAP['compliance-assessments'];
+	const folderId = compliance_assessment.folder?.id ?? compliance_assessment.folder;
+	const canEditObject: boolean = canPerformAction({
+		user,
+		action: 'change',
+		model: model.name,
+		domain: folderId
+	});
+	const requirementAssessmentModel = URL_MODEL_MAP['requirement-assessments'];
+	const canEditRequirementAssessment: boolean =
+		!data.compliance_assessment.is_locked &&
+		canPerformAction({
+			user,
+			action: 'change',
+			model: requirementAssessmentModel.name,
+			domain: folderId
+		});
+
+	const viewerRole: 'auditor' | 'respondent' = page.data.user.is_third_party
+		? 'respondent'
+		: 'auditor';
+	const fieldVis = $derived(getFieldVisibility(compliance_assessment, viewerRole));
+	const showAnswers = $derived(fieldVis.showAnswers);
+	const showResult = $derived(fieldVis.showResult);
+	const showExtendedResult = $derived(fieldVis.showExtendedResult);
+	const showStatus = $derived(fieldVis.showStatus);
+	const showScore = $derived(fieldVis.showScore);
+
+	const has_threats = data.threats.total_unique_threats > 0;
+
+	const objectsNotVisibleLabel = (count: number): string => {
+		return m.objectsNotVisible({ count });
+	};
+
+	let threatDialogOpen = $state(false);
+	let dialogElement = $state();
+
+	function openThreatsDialog() {
+		threatDialogOpen = true;
+		// Need to use the next tick to ensure the dialog is in the DOM
+		setTimeout(() => {
+			if (dialogElement) dialogElement.showModal();
+		}, 0);
+	}
+
+	function closeThreatsDialog() {
+		threatDialogOpen = false;
+		if (dialogElement) dialogElement.close();
+	}
+
+	import ForceCirclePacking from '$lib/components/DataViz/ForceCirclePacking.svelte';
+	import { getModalStore, type ModalStore } from '$lib/components/Modals/stores';
+	import CompareAuditModal from '$lib/components/Modals/CompareAuditModal.svelte';
+	import MapFromAuditModal from '$lib/components/Modals/MapFromAuditModal.svelte';
+	import MappingDirectionModal from '$lib/components/Modals/MappingDirectionModal.svelte';
+	import Dropdown from '$lib/components/Dropdown/Dropdown.svelte';
+
+	function handleKeydown(event: KeyboardEvent) {
+		if (event.metaKey || event.ctrlKey) return;
+		if (document.activeElement?.tagName !== 'BODY') return; // otherwise it will interfere with input fields
+		if (event.key === 'f') {
+			event.preventDefault();
+			goto(`${page.url.pathname}/flash-mode`);
+		}
+		if (event.key === 't') {
+			event.preventDefault();
+			goto(`${page.url.pathname}/table-mode`);
+		}
+	}
+
+	onMount(() => {
+		// Add event listener to the document
+		document.addEventListener('keydown', handleKeydown);
+
+		// Cleanup function to remove event listener
+		return () => {
+			document.removeEventListener('keydown', handleKeydown);
+		};
+	});
+
+	const countResults = (
+		node: Node,
+		resultCounts: Record<string, number> = {}
+	): Record<string, number> => {
+		if (node.result && node.assessable) {
+			resultCounts[node.result] = (resultCounts[node.result] || 0) + 1;
+		}
+		if (node.status && node.assessable) {
+			resultCounts[node.status] = (resultCounts[node.status] || 0) + 1;
+		}
+		if (node.is_scored && node.assessable && node.result !== 'not_applicable') {
+			const weight = node.weight || 1;
+			resultCounts['scored'] = (resultCounts['scored'] || 0) + 1;
+			resultCounts['total_weight'] = (resultCounts['total_weight'] || 0) + weight;
+			const nodeDocumentationScore = data.compliance_assessment.show_documentation_score
+				? node.documentation_score
+				: 0;
+			resultCounts['total_documentation_score'] =
+				(resultCounts['total_documentation_score'] || 0) + (nodeDocumentationScore || 0) * weight;
+			resultCounts['total_score'] = (resultCounts['total_score'] || 0) + (node.score || 0) * weight;
+		}
+
+		if (node.children && Object.keys(node.children).length > 0) {
+			for (const childId in node.children) {
+				if (Object.prototype.hasOwnProperty.call(node.children, childId)) {
+					const childNode = node.children[childId];
+					countResults(childNode, resultCounts);
+				}
+			}
+		}
+		return resultCounts;
+	};
+
+	let id = $state(page.params.id);
+	// derive the current filters for this audit ID
+	const currentFilters = derived(auditFiltersStore, ($f) => $f[id] ?? {});
+	// reactive values that update whenever auditFiltersStore changes
+	let selectedStatus = $state([]);
+	let selectedResults = $state([]);
+	let selectedExtendedResults = $state([]);
+	let displayOnlyAssessableNodes = $state(false);
+	$effect(
+		() =>
+			({
+				selectedStatus = [],
+				selectedResults = [],
+				selectedExtendedResults = [],
+				displayOnlyAssessableNodes = false
+			} = $currentFilters)
+	);
+
+	function toggleItem(item, selectedItems) {
+		if (selectedItems.includes(item)) {
+			return selectedItems.filter((s) => s !== item);
+		} else {
+			return [...selectedItems, item];
+		}
+	}
+
+	function toggleStatus(status) {
+		selectedStatus = toggleItem(status, selectedStatus);
+		auditFiltersStore.setStatus(page.params.id, selectedStatus);
+	}
+
+	function toggleResult(result) {
+		selectedResults = toggleItem(result, selectedResults);
+		auditFiltersStore.setResults(page.params.id, selectedResults);
+	}
+
+	function toggleExtendedResult(extendedResult) {
+		selectedExtendedResults = toggleItem(extendedResult, selectedExtendedResults);
+		auditFiltersStore.setExtendedResults(page.params.id, selectedExtendedResults);
+	}
+
+	function isNodeHidden(node: Node, displayOnlyAssessableNodes: boolean): boolean {
+		const hasAssessableChildren = Object.keys(node.children || {}).length > 0;
+		return (
+			(displayOnlyAssessableNodes && !node.assessable && !hasAssessableChildren) ||
+			(node.assessable &&
+				((selectedStatus.length > 0 && !selectedStatus.includes(node.status)) ||
+					(selectedResults.length > 0 && !selectedResults.includes(node.result)) ||
+					(selectedExtendedResults.length > 0 &&
+						!selectedExtendedResults.includes(node.extended_result))))
+		);
+	}
+	function transformToTreeView(nodes: Node[], hasParentNode: boolean = false) {
+		return nodes.map(([id, node]) => {
+			node.resultCounts = countResults(node);
+			const hidden = isNodeHidden(node, displayOnlyAssessableNodes);
+
+			return {
+				id: id,
+				content: TreeViewItemContent,
+				contentProps: {
+					...node,
+					canEditRequirementAssessment,
+					hasParentNode,
+					showAnswers,
+					showResult,
+					showStatus,
+					showScore,
+					showDocumentationScore: data.compliance_assessment.show_documentation_score,
+					scoringEnabled: data.compliance_assessment.scoring_enabled,
+					scoreCalculationMethod: data.compliance_assessment.score_calculation_method,
+					hidden,
+					selectedStatus
+				},
+				lead: TreeViewItemLead,
+				leadProps: {
+					statusI18n: node.status_i18n,
+					resultI18n: node.result_i18n,
+					assessable: node.assessable,
+					statusColor: complianceStatusColorMap[node.status],
+					resultColor: complianceResultColorMap[node.result],
+					score: node.score,
+					documentationScore: node.documentation_score,
+					isScored: node.is_scored,
+					showResult,
+					showScore,
+					showStatus,
+					scoringEnabled: data.compliance_assessment.scoring_enabled,
+					showDocumentationScore: data.compliance_assessment.show_documentation_score,
+					max_score: node.max_score,
+					min_score: node.min_score ?? 0,
+					progressStatusEnabled: data.compliance_assessment.progress_status_enabled,
+					extendedResultEnabled: data.compliance_assessment.extended_result_enabled,
+					showExtendedResult,
+					extendedResult: node.extended_result,
+					extendedResultColor: extendedResultColorMap[node.extended_result]
+				},
+				children: node.children ? transformToTreeView(Object.entries(node.children), true) : []
+			};
+		});
+	}
+	let treeViewNodes: TreeViewNode[] = $state();
+
+	function assessableNodesCount(nodes: TreeViewNode[]): number {
+		let count = 0;
+		for (const node of nodes) {
+			if (node.contentProps.assessable) {
+				count++;
+			}
+			if (node.children) {
+				count += assessableNodesCount(node.children);
+			}
+		}
+		return count;
+	}
+
+	let expandedNodes: TreeViewNode[] = $state([]);
+
+	expandedNodes = $expandedNodesState;
+
+	const modalStore: ModalStore = getModalStore();
+
+	function modalApplyMapping(): void {
+		// Entry point: let the user pick the mapping direction.
+		// "Map to a framework" creates a new audit; "Map from an audit"
+		// updates the current one.
+		const modalComponent: ModalComponent = {
+			ref: MappingDirectionModal,
+			props: {
+				mapTo: modalCreateForm,
+				mapFrom: modalMapFromAudit
+			}
+		};
+		const modal: ModalSettings = {
+			type: 'component',
+			component: modalComponent
+		};
+		modalStore.trigger(modal);
+	}
+
+	function modalCreateForm(): void {
+		const modalComponent: ModalComponent = {
+			ref: CreateModal,
+			props: {
+				form: data.auditCreateForm,
+				context: 'fromBaseline',
+				model: data.auditModel,
+				debug: false
+			}
+		};
+		const modal: ModalSettings = {
+			type: 'component',
+			component: modalComponent,
+			// Data
+			title: m.createAuditFromBaseline()
+		};
+		modalStore.trigger(modal);
+	}
+
+	function modalCreateCloneForm(): void {
+		const modalComponent: ModalComponent = {
+			ref: CreateModal,
+			props: {
+				form: data.auditCloneForm,
+				context: 'clone',
+				model: data.auditModel,
+				debug: false
+			}
+		};
+		const modal: ModalSettings = {
+			type: 'component',
+			component: modalComponent,
+			// Data
+			title: m.cloneAudit()
+		};
+		modalStore.trigger(modal);
+	}
+
+	function modalCompareAudit(): void {
+		const modalComponent: ModalComponent = {
+			ref: CompareAuditModal,
+			props: {
+				currentAudit: data.compliance_assessment
+			}
+		};
+		const modal: ModalSettings = {
+			type: 'component',
+			component: modalComponent
+		};
+		modalStore.trigger(modal);
+	}
+
+	function modalMapFromAudit(): void {
+		const modalComponent: ModalComponent = {
+			ref: MapFromAuditModal,
+			props: {
+				currentAudit: data.compliance_assessment
+			}
+		};
+		const modal: ModalSettings = {
+			type: 'component',
+			component: modalComponent
+		};
+		modalStore.trigger(modal);
+	}
+
+	function buildExportGroups(): ExportGroup[] {
+		const ca = data.compliance_assessment;
+		const id = ca.id;
+		const isInternal = !page.data.user.is_third_party;
+		const frameworkUrn = ca.framework?.urn ?? '';
+		// CyFun stays exact: backend cyfun_xlsx (views.py) hardcodes the 2025
+		// sheet layout, so other versions would 400. Bump both when a new CyFun
+		// ships. ISO27001 is prefix-matched — SoA only navigates to a page
+		// whose semantics carry across 27001 versions.
+		const isCyFun = frameworkUrn === CYFUN_2025_FRAMEWORK_URN;
+		const isIso27001 = frameworkUrn.startsWith(ISO27001_FRAMEWORK_URN_PREFIX);
+
+		const auditOptions = [
+			isInternal && {
+				titleKey: 'exportRequirementsData',
+				descriptionKey: 'exportRequirementsDataDesc',
+				format: 'CSV' as const,
+				href: `/compliance-assessments/${id}/export/csv`,
+				testId: 'export-option-csv'
+			},
+			isInternal && {
+				titleKey: 'exportRequirementsWorkbook',
+				descriptionKey: 'exportRequirementsWorkbookDesc',
+				format: 'XLSX' as const,
+				href: `/compliance-assessments/${id}/export/xlsx`,
+				testId: 'export-option-xlsx'
+			},
+			isInternal && {
+				titleKey: 'exportExecutiveSummary',
+				descriptionKey: 'exportExecutiveSummaryDesc',
+				format: 'DOCX' as const,
+				href: `/compliance-assessments/${id}/export/word`,
+				testId: 'export-option-word'
+			},
+			isInternal &&
+				isCyFun && {
+					titleKey: 'exportCyFunAssessment',
+					descriptionKey: 'exportCyFunAssessmentDesc',
+					format: 'XLSX' as const,
+					href: `/compliance-assessments/${id}/export/cyfun-xlsx`,
+					testId: 'export-option-cyfun-xlsx'
+				},
+			{
+				titleKey: 'exportBundleWithEvidences',
+				descriptionKey: 'exportBundleWithEvidencesDesc',
+				format: 'ZIP' as const,
+				href: `/compliance-assessments/${id}/export`,
+				testId: 'export-option-zip'
+			},
+			isInternal &&
+				isIso27001 && {
+					titleKey: 'exportSoaBuilder',
+					descriptionKey: 'exportSoaBuilderDesc',
+					format: 'HTML' as const,
+					href: `/reports/soa?ca=${id}`,
+					kind: 'navigate' as const,
+					testId: 'export-option-soa'
+				}
+		].filter(Boolean);
+
+		const actionPlanOptions = isInternal
+			? [
+					{
+						titleKey: 'exportControlsList',
+						descriptionKey: 'exportControlsListDesc',
+						format: 'CSV' as const,
+						href: `/compliance-assessments/${id}/action-plan/export/csv`,
+						testId: 'export-option-ap-csv'
+					},
+					{
+						titleKey: 'exportControlsWorkbook',
+						descriptionKey: 'exportControlsWorkbookDesc',
+						format: 'XLSX' as const,
+						href: `/compliance-assessments/${id}/action-plan/export/xlsx`,
+						testId: 'export-option-ap-xlsx'
+					},
+					{
+						titleKey: 'exportStatusGroupedReport',
+						descriptionKey: 'exportStatusGroupedReportDesc',
+						format: 'PDF' as const,
+						href: `/compliance-assessments/${id}/action-plan/export/pdf`,
+						testId: 'export-option-ap-pdf'
+					}
+				]
+			: [];
+
+		return [
+			{ titleKey: 'complianceAssessment', options: auditOptions as ExportGroup['options'] },
+			{ titleKey: 'actionPlan', options: actionPlanOptions }
+		];
+	}
+
+	import GenerateAuditReportModal from '$lib/components/Modals/GenerateAuditReportModal.svelte';
+
+	let showReportModal = $state(false);
+	let selectedReportAudit = $state<any>(null);
+
+	function openReportModal(): void {
+		selectedReportAudit = {
+			id: compliance_assessment.id,
+			name: compliance_assessment.name,
+			framework_name: compliance_assessment.framework?.str || compliance_assessment.framework?.name || 'Custom Upload'
+		};
+		showReportModal = true;
+	}
+
+	function modalExport(): void {
+		const modalComponent: ModalComponent = {
+			ref: ExportModal,
+			props: {
+				title: m.exportOptionsTitle(),
+				groups: buildExportGroups()
+			}
+		};
+		const modal: ModalSettings = {
+			type: 'component',
+			component: modalComponent
+		};
+		modalStore.trigger(modal);
+	}
+
+	function modalRequestValidation(): void {
+		const modalComponent: ModalComponent = {
+			ref: CreateModal,
+			props: {
+				form: data.validationFlowForm,
+				model: getModelInfo('validation-flows'),
+				formAction: '/validation-flows?/create',
+				invalidateAll: true,
+				onConfirm: async () => {
+					await invalidateAll();
+				}
+			}
+		};
+		const modal: ModalSettings = {
+			type: 'component',
+			component: modalComponent,
+			title: m.requestValidation()
+		};
+		modalStore.trigger(modal);
+	}
+	let syncingToActionsIsLoading = $state(false);
+	async function modalConfirmSyncToActions(
+		id: string,
+		name: string,
+		action: string
+	): Promise<void> {
+		const requirementAssessmentsSync = await fetch(
+			`/compliance-assessments/${page.params.id}/sync-to-actions`,
+			{ method: 'POST' }
+		).then((response) => {
+			if (response.ok) {
+				return response.json();
+			} else {
+				throw new Error('Failed to fetch requirement assessments sync data');
+			}
+		});
+		const modalComponent: ModalComponent = {
+			ref: ConfirmModal,
+			props: {
+				_form: data.form,
+				id: id,
+				URLModel: 'compliance-assessments',
+				formAction: action,
+				bodyComponent: List,
+				bodyProps: {
+					items: Object.values(requirementAssessmentsSync.changes).map(
+						({ str, changes }) =>
+							`${str}: ${changes
+								.map((change) => `${safeTranslate(change.current)} ➡️ ${safeTranslate(change.new)}`)
+								.join(' | ')}`
+					),
+					message: m.theFollowingChangesWillBeApplied()
+				}
+			}
+		};
+		const modal: ModalSettings = {
+			type: 'component',
+			component: modalComponent,
+			// Data
+			title: m.syncToAppliedControls(),
+			body: m.syncToAppliedControlsMessage(),
+			response: (r: boolean) => {
+				syncingToActionsIsLoading = r;
+			}
+		};
+		modalStore.trigger(modal);
+	}
+	let createAppliedControlsLoading = $state(false);
+
+	async function modalConfirmCreateSuggestedControls(id: string, _name: string, _action: string) {
+		if (createAppliedControlsLoading) return;
+		createAppliedControlsLoading = true;
+		type PreviewItem = { id: string; label: string; status: 'create' | 'reuse' | 'linked' };
+		let previewItems: PreviewItem[] = [];
+		try {
+			const previewResponse = await fetch(
+				`/compliance-assessments/${id}/suggestions/applied-controls?dry_run=true`
+			);
+			if (previewResponse.ok) {
+				const previewData: any[] = await previewResponse.json();
+				const seen = new Set<string>();
+				previewItems = previewData
+					.filter((control) => control?.reference_control?.id)
+					.map((control) => ({
+						id: control.reference_control.id as string,
+						label:
+							control?.name ||
+							control?.reference_control?.str ||
+							control?.reference_control?.name ||
+							control?.ref_id ||
+							'',
+						status: (control?.suggestion_status as 'create' | 'reuse' | 'linked') ?? 'create'
+					}))
+					.filter((item) => {
+						if (seen.has(item.id)) return false;
+						seen.add(item.id);
+						return true;
+					});
+			} else {
+				throw new Error(await previewResponse.text());
+			}
+		} catch (error) {
+			console.error('Unable to fetch suggested controls preview', error);
+			previewItems = (data.compliance_assessment.framework?.reference_controls || [])
+				.filter((control: any) => control?.id)
+				.map((control: any) => ({
+					id: control.id as string,
+					label:
+						control?.name ||
+						control?.reference_control?.str ||
+						control?.reference_control?.name ||
+						control?.ref_id ||
+						'',
+					status: 'create' as const
+				}));
+		}
+
+		if (previewItems.length === 0) {
+			createAppliedControlsLoading = false;
+			return;
+		}
+
+		const modalComponent: ModalComponent = {
+			ref: SuggestControlsModal,
+			props: {
+				items: previewItems,
+				endpoint: `/compliance-assessments/${id}/suggestions/applied-controls`
+			}
+		};
+		const modal: ModalSettings = {
+			type: 'component',
+			component: modalComponent,
+			title: m.suggestControls(),
+			body: m.createAppliedControlsFromSuggestionsConfirmMessage({
+				count: previewItems.filter((i) => i.status !== 'linked').length
+			}),
+			response: () => {
+				createAppliedControlsLoading = false;
+			}
+		};
+		modalStore.trigger(modal);
+	}
+
+	let tree = $derived(data.tree);
+	let compliance_assessment_donut_values = $derived(data.compliance_assessment_donut_values);
+
+	let filterPopupOpen = $state(false);
+
+	run(() => {
+		if (tree) {
+			treeViewNodes = transformToTreeView(Object.entries(tree));
+		}
+	});
+	run(() => {
+		expandedNodesState.set(expandedNodes);
+	});
+	run(() => {
+		if (syncingToActionsIsLoading === true && (form || form?.error))
+			syncingToActionsIsLoading = false;
+	});
+	run(() => {
+		if (createAppliedControlsLoading === true && (form || form?.error))
+			createAppliedControlsLoading = false;
+	});
+
+	let filterCount = $derived(
+		(selectedStatus.length > 0 ? 1 : 0) +
+			(selectedResults.length > 0 ? 1 : 0) +
+			(selectedExtendedResults.length > 0 ? 1 : 0) +
+			(displayOnlyAssessableNodes ? 1 : 0)
+	);
+
+	let hasNonVisibleObjects = $derived(() => {
+		if (!canEditObject) return false;
+		for (const [key, value] of Object.entries(data.compliance_assessment)) {
+			if (Array.isArray(value)) {
+				const maskedCount = countMasked(value);
+				if (maskedCount > 0) return true;
+			} else if (isMaskedPlaceholder(value)) {
+				return true;
+			}
+		}
+		return false;
+	});
+</script>
+
+<div class="flex flex-col space-y-4 whitespace-pre-line">
+	{#if data.compliance_assessment.is_locked}
+		<div
+			class="alert bg-yellow-100 border border-yellow-300 text-yellow-800 px-4 py-3 rounded-lg shadow-sm"
+		>
+			<div class="flex items-center">
+				<i class="fa-solid fa-lock text-yellow-600 mr-2"></i>
+				<span class="font-medium">{m.lockedAssessment()}</span>
+				<span class="ml-2 text-sm">{m.lockedAssessmentMessage()}</span>
+			</div>
+		</div>
+	{/if}
+
+	<div class="flex flex-col card px-6 py-4 bg-surface-50-950 shadow-lg w-full">
+		<div class="flex flex-row justify-between">
+			<div class="flex flex-col space-y-2 whitespace-pre-line w-1/5 pr-1">
+				{#each Object.entries(data.compliance_assessment).filter(([key, value]) => {
+					const fieldsToShow = ['ref_id', 'name', 'description', 'version', 'folder', 'perimeter', 'framework', 'authors', 'reviewers', 'status', 'selected_implementation_groups', 'campaign'];
+					if (!fieldsToShow.includes(key)) return false;
+					// Hide selected_implementation_groups if framework doesn't support implementation groups
+					if (key === 'selected_implementation_groups' && (!data.compliance_assessment.framework?.implementation_groups_definition || !Array.isArray(data.compliance_assessment.framework?.implementation_groups_definition) || data.compliance_assessment.framework?.implementation_groups_definition.length === 0)) return false;
+					return true;
+				}) as [key, value]}
+					{@const isUpdatableFramework = key === 'framework' && value?.has_update}
+					<div class="flex flex-col">
+						<div
+							class="text-sm font-medium text-surface-800-200 capitalize-first"
+							data-testid={key.replaceAll('_', '-') + '-field-title'}
+						>
+							{#if isUpdatableFramework}
+								<i title={m.updateAvailable()} class="fa-solid fa-circle-up text-success-600-400"
+								></i>
+							{/if}
+							{safeTranslate(key)}
+							{#if isUpdatableFramework}
+								({m.updateAvailable()})
+							{/if}
+						</div>
+						<ul class="text-sm">
+							<li
+								class="text-surface-600-400 list-none"
+								data-testid={key.replaceAll('_', '-') + '-field-value'}
+							>
+								{#if value}
+									{#if Array.isArray(value)}
+										{@const hiddenCount = countMasked(value)}
+										{@const visibleValues = value.filter((item) => !isMaskedPlaceholder(item))}
+										{#if visibleValues.length > 0}
+											<ul>
+												{#each visibleValues as val}
+													<li>
+														{#if val.str && val.id}
+															{@const itemHref = `/${
+																URL_MODEL_MAP[data.URLModel]['foreignKeyFields']?.find(
+																	(item) => item.field === key
+																)?.urlModel
+															}/${val.id}`}
+															{#if !page.data.user.is_third_party}
+																<Anchor href={itemHref} class="anchor">{val.str}</Anchor>
+															{:else}
+																{val.str}
+															{/if}
+														{:else if val.str}
+															{val.str}
+														{:else}
+															{safeTranslate(val)}
+														{/if}
+													</li>
+												{/each}
+											</ul>
+											{#if hiddenCount > 0}
+												<p class="mt-1 text-xs text-yellow-700">
+													{objectsNotVisibleLabel(hiddenCount)}
+												</p>
+											{/if}
+										{:else if hiddenCount > 0}
+											<p class="text-xs text-yellow-700">
+												{objectsNotVisibleLabel(hiddenCount)}
+											</p>
+										{:else}
+											--
+										{/if}
+									{:else if value.str && value.id}
+										{@const itemHref = `/${
+											URL_MODEL_MAP['compliance-assessments']['foreignKeyFields']?.find(
+												(item) => item.field === key
+											)?.urlModel
+										}/${value.id}`}
+										{#if !page.data.user.is_third_party}
+											<Anchor href={itemHref} class="anchor">{value.str}</Anchor>
+										{:else}
+											{value.str}
+										{/if}
+									{:else if isMaskedPlaceholder(value)}
+										<p class="text-xs text-yellow-700">{objectsNotVisibleLabel(1)}</p>
+									{:else if key === 'description'}
+										<MarkdownRenderer content={value} />
+									{:else}
+										{safeTranslate(value.str ?? value)}
+									{/if}
+								{:else}
+									--
+								{/if}
+							</li>
+						</ul>
+					</div>
+				{/each}
+				<div>
+					<div class="font-medium">{m.createdAt()}</div>
+					{formatDateOrDateTime(data.compliance_assessment.created_at, getLocale())}
+				</div>
+				{#if showResult && compliance_assessment.framework?.outcomes_definition?.length}
+					<div>
+						<div class="text-sm font-medium text-surface-800-200">{safeTranslate('outcomes')}</div>
+						<div class="flex flex-wrap gap-1.5 mt-1">
+							{#each compliance_assessment.framework?.outcomes_definition || [] as rule}
+								{@const isActive =
+									compliance_assessment.computed_outcome &&
+									rule.ref_id in compliance_assessment.computed_outcome}
+								<span
+									class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border"
+									class:font-semibold={isActive}
+									class:text-surface-800-200={isActive}
+									class:bg-surface-50-950={isActive}
+									class:border-surface-300-700={isActive}
+									class:shadow-sm={isActive}
+									class:font-normal={!isActive}
+									class:text-surface-400-600={!isActive}
+									class:bg-surface-100-900={!isActive}
+									class:border-surface-200-800={!isActive}
+									class:opacity-50={!isActive}
+								>
+									<span
+										class="w-2 h-2 rounded-full shrink-0 translate-y-px"
+										style="background-color: {rule.color ?? '#d1d5db'}"
+										class:opacity-40={!isActive}
+									></span>
+									{rule.annotation ?? rule.ref_id}
+								</span>
+							{/each}
+						</div>
+					</div>
+				{/if}
+				{#if page.data?.featureflags?.validation_flows}
+					{#key compliance_assessment.validation_flows}
+						<ValidationFlowsSection validationFlows={compliance_assessment.validation_flows} />
+					{/key}
+				{/if}
+			</div>
+			{#key compliance_assessment_donut_values}
+				{#if showScore && data.global_score && data.global_score.maturity_score >= 0}
+					<div class="w-1/4">
+						<RingProgress
+							name="global_maturity"
+							value={data.global_score.maturity_score}
+							max={data.global_score.total_max_score}
+							color={getScoreHexColor(
+								data.global_score.maturity_score,
+								data.global_score.total_max_score
+							)}
+							strokeWidth={35}
+							fontSize={36}
+							title={m.maturity()}
+						/>
+					</div>
+				{/if}
+				{#if showResult}
+					<div class={data.compliance_assessment.extended_result_enabled ? 'w-1/4' : 'w-1/3'}>
+						<DonutChart
+							s_label="Result"
+							name="compliance_result"
+							title={m.compliance()}
+							orientation="horizontal"
+							values={compliance_assessment_donut_values.result.values}
+							colors={compliance_assessment_donut_values.result.values.map(
+								(object) => object.itemStyle.color
+							)}
+							showPercentage={true}
+						/>
+					</div>
+				{/if}
+				{#if showExtendedResult && compliance_assessment_donut_values.extended_result?.values?.length > 0}
+					<div class="w-1/4">
+						<DonutChart
+							s_label="Extended Result"
+							name="compliance_extended_result"
+							title={m.extendedResult()}
+							orientation="horizontal"
+							values={compliance_assessment_donut_values.extended_result.values}
+							colors={compliance_assessment_donut_values.extended_result.values.map(
+								(object) => object.itemStyle.color
+							)}
+							showPercentage={true}
+						/>
+					</div>
+				{/if}
+				{#if showStatus}
+					<div class={data.compliance_assessment.extended_result_enabled ? 'w-1/4' : 'w-1/3'}>
+						<DonutChart
+							s_label="Status"
+							name="compliance_status"
+							title={m.progress()}
+							orientation="horizontal"
+							values={compliance_assessment_donut_values.status.values}
+							colors={compliance_assessment_donut_values.status.values.map(
+								(object) => object.itemStyle.color
+							)}
+							showPercentage={true}
+						/>
+					</div>
+				{/if}
+			{/key}
+			{#if showAnswers && data.compliance_assessment.answers_progress != null}
+				<div class="flex items-center gap-2 text-sm text-surface-600-400 mt-2">
+					<i class="fa-solid fa-clipboard-question text-primary-500"></i>
+					<span>{m.questions()}: {data.compliance_assessment.answers_progress}%</span>
+					<div class="flex-1 bg-surface-200-800 rounded-full h-1.5 max-w-32">
+						<div
+							class="h-1.5 rounded-full bg-primary-400 transition-all"
+							style="width: {data.compliance_assessment.answers_progress}%;"
+						></div>
+					</div>
+				</div>
+			{/if}
+			<div class="flex flex-col space-y-2 ml-4">
+				<div class="flex flex-row space-x-2">
+					<button
+						type="button"
+						class="btn preset-filled-primary-500 w-full cursor-pointer"
+						onclick={openReportModal}
+						data-testid="export-button"
+					>
+						<i class="fa-solid fa-download mr-2"></i>{m.exportButton()}
+					</button>
+					{#if canEditObject}
+						<Anchor
+							breadcrumbAction="push"
+							href={`${page.url.pathname}/edit?next=${page.url.pathname}`}
+							class="btn preset-filled-primary-500 h-fit"
+							data-testid="edit-button"
+							><i class="fa-solid fa-pen-to-square mr-2"></i> {m.edit()}</Anchor
+						>
+					{/if}
+				</div>
+				{#if !page.data.user.is_third_party}
+					{#if canEditObject && page.data?.featureflags?.auditee_mode && !data.compliance_assessment.is_locked}
+						<Anchor
+							href={`${page.url.pathname}/assignments`}
+							class="btn bg-emerald-600 hover:bg-emerald-500 text-white font-semibold h-fit"
+							breadcrumbAction="push"
+							data-testid="header-assignments-button"
+						>
+							<i class="fa-solid fa-user-tag mr-2"></i>{m.assignments()}
+						</Anchor>
+					{/if}
+					<Anchor
+						href={`${page.url.pathname}/action-plan`}
+						class="btn preset-filled-primary-500 h-fit"
+						breadcrumbAction="push"
+						data-testid="action-plan-button"
+						><i class="fa-solid fa-heart-pulse mr-2"></i>{m.actionPlan()}</Anchor
+					>
+					<Anchor
+						href={`${page.url.pathname}/evidences-list`}
+						class="btn preset-filled-secondary-500 h-fit"
+						breadcrumbAction="push"
+						><i class="fa-solid fa-file-lines mr-2"></i>{m.evidences()}</Anchor
+					>
+					<AuditTrailButton
+						model="compliance-assessments"
+						objectId={data.compliance_assessment.id}
+					/>
+				{/if}
+				<!-- Power-ups Command Palette Grid -->
+				<div class="pt-3 border-t border-surface-200-800 mt-2 space-y-3">
+					<span
+						class="text-xs font-semibold text-surface-400-600 uppercase tracking-widest select-none"
+						>{m.powerUps()}</span
+					>
+
+					<!-- Modes -->
+					{#if !data.compliance_assessment.is_locked}
+						<div>
+							<span
+								class="text-[11px] font-medium text-surface-400-600 uppercase tracking-wider mb-1.5 block"
+								>{m.modes()}</span
+							>
+							<div class="grid grid-cols-2 gap-2">
+								{#if !page.data.user.is_third_party}
+									<Anchor
+										breadcrumbAction="push"
+										href={`${page.url.pathname}/flash-mode`}
+										class="flex items-center gap-3 px-3.5 py-3 rounded-xl bg-indigo-50 border border-indigo-100 text-indigo-700 hover:bg-indigo-100 hover:border-indigo-200 dark:bg-surface-800 dark:border-surface-700 dark:text-indigo-300 dark:hover:bg-surface-700 dark:hover:border-surface-600 transition-colors cursor-pointer"
+										data-testid="flash-mode-button"
+									>
+										<div
+											class="flex items-center justify-center w-8 h-8 rounded-lg bg-indigo-500 dark:bg-indigo-600 text-white shrink-0"
+										>
+											<i class="fa-solid fa-bolt text-sm"></i>
+										</div>
+										<span class="text-sm font-semibold">{m.flashMode()}</span>
+									</Anchor>
+								{/if}
+								<Anchor
+									breadcrumbAction="push"
+									href={`${page.url.pathname}/table-mode`}
+									class="flex items-center gap-3 px-3.5 py-3 rounded-xl bg-surface-50-950 border border-surface-100-900 text-surface-700-300 hover:bg-surface-100-900 hover:border-surface-200-800 transition-colors cursor-pointer"
+									data-testid="table-mode-button"
+								>
+									<div
+										class="flex items-center justify-center w-8 h-8 rounded-lg bg-slate-500 text-white shrink-0"
+									>
+										<i class="fa-solid fa-table-list text-sm"></i>
+									</div>
+									<span class="text-sm font-semibold">{m.tableMode()}</span>
+								</Anchor>
+							</div>
+						</div>
+					{/if}
+
+					<!-- Actions -->
+					{#if !page.data.user.is_third_party}
+						<div>
+							<span
+								class="text-[11px] font-medium text-surface-400-600 uppercase tracking-wider mb-1.5 block"
+								>{m.actions()}</span
+							>
+							<div class="grid grid-cols-2 gap-2">
+								<button
+									class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border border-surface-200-800 bg-surface-50-950 text-surface-700-300 hover:bg-surface-100-900 hover:border-surface-300-700 transition-colors shadow-sm cursor-pointer text-left"
+									onclick={() => modalApplyMapping()}
+									data-testid="apply-mapping-button"
+								>
+									<i class="fa-solid fa-diagram-project text-emerald-500 text-base"></i>
+									<span class="text-sm font-medium">{m.applyMapping()}</span>
+								</button>
+								<button
+									class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border border-surface-200-800 bg-surface-50-950 text-surface-700-300 hover:bg-surface-100-900 hover:border-surface-300-700 transition-colors shadow-sm cursor-pointer text-left"
+									onclick={() => modalCreateCloneForm()}
+									data-testid="clone-audit-button"
+								>
+									<i class="fa-solid fa-copy text-fuchsia-500 text-base"></i>
+									<span class="text-sm font-medium">{m.cloneAudit()}</span>
+								</button>
+								<button
+									class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border border-surface-200-800 bg-surface-50-950 text-surface-700-300 hover:bg-surface-100-900 hover:border-surface-300-700 transition-colors shadow-sm cursor-pointer text-left"
+									onclick={() => modalCompareAudit()}
+									data-testid="compare-audit-button"
+								>
+									<i class="fa-solid fa-code-compare text-rose-500 text-base"></i>
+									<span class="text-sm font-medium">{m.compareToAudit()}</span>
+								</button>
+								{#if page.data?.featureflags?.validation_flows}
+									<button
+										class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border border-surface-200-800 bg-surface-50-950 text-surface-700-300 hover:bg-surface-100-900 hover:border-surface-300-700 transition-colors shadow-sm cursor-pointer text-left"
+										onclick={() => modalRequestValidation()}
+										data-testid="request-validation-button"
+									>
+										<i class="fa-solid fa-check-circle text-amber-500 text-base"></i>
+										<span class="text-sm font-medium">{m.requestValidation()}</span>
+									</button>
+								{/if}
+								{#if !data.compliance_assessment.is_locked}
+									<button
+										class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border border-surface-200-800 bg-surface-50-950 text-surface-700-300 hover:bg-surface-100-900 hover:border-surface-300-700 transition-colors shadow-sm cursor-pointer text-left"
+										data-testid="sync-to-actions-button"
+										onclick={async () => {
+											await modalConfirmSyncToActions(
+												data.compliance_assessment.id,
+												data.compliance_assessment.name,
+												'?/syncToActions'
+											);
+										}}
+									>
+										{#if syncingToActionsIsLoading}
+											<Progress value={null}>
+												<Progress.Circle class="[--size:--spacing(5)]">
+													<Progress.CircleTrack />
+													<Progress.CircleRange class="stroke-cyan-500" />
+												</Progress.Circle>
+											</Progress>
+										{:else}
+											<i class="fa-solid fa-arrows-rotate text-cyan-500 text-base"></i>
+										{/if}
+										<span class="text-sm font-medium">{m.syncToAppliedControls()}</span>
+									</button>
+									{#if Object.hasOwn(page.data.user.permissions, 'add_appliedcontrol') && (data.compliance_assessment.framework?.reference_controls?.length ?? 0) > 0}
+										<button
+											class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border border-surface-200-800 bg-surface-50-950 text-surface-700-300 hover:bg-surface-100-900 hover:border-surface-300-700 transition-colors shadow-sm cursor-pointer text-left"
+											onclick={() => {
+												modalConfirmCreateSuggestedControls(
+													data.compliance_assessment.id,
+													data.compliance_assessment.name,
+													'?/createSuggestedControls'
+												);
+											}}
+										>
+											{#if createAppliedControlsLoading}
+												<Progress value={null}>
+													<Progress.Circle class="[--size:--spacing(5)]">
+														<Progress.CircleTrack />
+														<Progress.CircleRange class="stroke-violet-500" />
+													</Progress.Circle>
+												</Progress>
+											{:else}
+												<i class="fa-solid fa-wand-magic-sparkles text-violet-500 text-base"></i>
+											{/if}
+											<span class="text-sm font-medium">{m.suggestControls()}</span>
+										</button>
+									{/if}
+								{/if}
+								{#if canEditObject && page.data?.featureflags?.auditee_mode && !data.compliance_assessment.is_locked && data.compliance_assessment.status !== 'in_review'}
+									<Anchor
+										breadcrumbAction="push"
+										href={`${page.url.pathname}/assignments`}
+										class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl border border-surface-200-800 bg-surface-50-950 text-surface-700-300 hover:bg-surface-100-900 hover:border-surface-300-700 transition-colors shadow-sm cursor-pointer text-left"
+										data-testid="assignments-button"
+									>
+										<i class="fa-solid fa-user-tag text-green-500 text-base"></i>
+										<span class="text-sm font-medium">{m.assignments()}</span>
+									</Anchor>
+								{/if}
+							</div>
+						</div>
+					{/if}
+
+					<!-- Insights -->
+					{#if (has_threats || page.data?.featureflags?.advanced_analytics) && !page.data.user.is_third_party}
+						<div>
+							<span
+								class="text-[11px] font-medium text-surface-400-600 uppercase tracking-wider mb-1.5 block"
+								>{m.insights()}</span
+							>
+							<div class="grid grid-cols-2 gap-2">
+								{#if has_threats && !page.data.user.is_third_party}
+									<button
+										class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 hover:bg-amber-100 transition-colors cursor-pointer text-left"
+										onclick={openThreatsDialog}
+									>
+										<div
+											class="flex items-center justify-center w-8 h-8 rounded-lg bg-amber-500 dark:bg-amber-600 text-white shrink-0"
+										>
+											<i class="fa-solid fa-triangle-exclamation text-sm"></i>
+										</div>
+										<div class="flex flex-col">
+											<span class="text-lg font-bold leading-tight"
+												>{data.threats.total_unique_threats}</span
+											>
+											<span class="text-xs text-amber-600">{m.potentialThreats()}</span>
+										</div>
+									</button>
+								{/if}
+								{#if page.data?.featureflags?.advanced_analytics && !page.data.user.is_third_party}
+									<Anchor
+										breadcrumbAction="push"
+										href={`${page.url.pathname}/advanced-analytics`}
+										class="flex items-center gap-3 px-3.5 py-2.5 rounded-xl bg-surface-50-950 border border-surface-200-800 text-surface-700-300 hover:bg-surface-100-900 transition-colors cursor-pointer"
+										data-testid="advanced-analytics-button"
+									>
+										<div
+											class="flex items-center justify-center w-8 h-8 rounded-lg bg-orange-500 dark:bg-orange-600 text-white shrink-0"
+										>
+											<i class="fa-solid fa-chart-line text-sm"></i>
+										</div>
+										<span class="text-sm font-semibold">{m.advancedAnalytics()}</span>
+									</Anchor>
+								{/if}
+							</div>
+						</div>
+					{/if}
+				</div>
+			</div>
+		</div>
+	</div>
+	<div class="card px-6 py-4 bg-surface-50-950 flex flex-col shadow-lg">
+		<div class="flex flex-row items-center font-semibold justify-between">
+			<div>
+				<span class="h4">{m.associatedRequirements()}</span>
+				<span class="badge bg-violet-400 text-white ml-1 rounded-xl">
+					{#if treeViewNodes}
+						{assessableNodesCount(treeViewNodes)}
+					{/if}
+				</span>
+			</div>
+			<div class="flex items-center gap-3 flex-wrap">
+				<!-- View Mode Switcher -->
+				<div class="flex items-center gap-1 bg-surface-100-900 p-1 rounded-xl border border-surface-200-800">
+					<span class="px-3 py-1 rounded-lg bg-primary-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs">
+						<i class="fa-solid fa-folder-tree"></i>
+						<span>Tree View</span>
+					</span>
+					<Anchor
+						href={`${page.url.pathname}/table-mode`}
+						class="px-3 py-1 rounded-lg hover:bg-surface-200-800 text-surface-600-400 hover:text-surface-900-100 text-xs font-semibold flex items-center gap-1.5 transition-all"
+					>
+						<i class="fa-solid fa-table-list"></i>
+						<span>Table Mode</span>
+					</Anchor>
+					{#if !page.data.user.is_third_party}
+						<Anchor
+							href={`${page.url.pathname}/flash-mode`}
+							class="px-3 py-1 rounded-lg hover:bg-surface-200-800 text-surface-600-400 hover:text-surface-900-100 text-xs font-semibold flex items-center gap-1.5 transition-all"
+						>
+							<i class="fa-solid fa-bolt text-indigo-400"></i>
+							<span>Flash Mode</span>
+						</Anchor>
+					{/if}
+				</div>
+
+				{#if treeViewNodes}
+					<TreeExpandCollapseToggle nodes={treeViewNodes} bind:expandedNodes />
+				{/if}
+				<Popover
+					open={filterPopupOpen}
+					onOpenChange={(e) => (filterPopupOpen = e.open)}
+					positioning={{ placement: 'bottom-start' }}
+					autoFocus={false}
+					onPointerDownOutside={() => (filterPopupOpen = false)}
+					closeOnInteractOutside={false}
+				>
+					<Popover.Trigger class="btn preset-filled-primary-500 w-fit">
+						<i class="fa-solid fa-filter mr-2"></i>
+						{m.filters()}
+						{#if filterCount}
+							<span class="text-xs">{filterCount}</span>
+						{/if}
+					</Popover.Trigger>
+					<Popover.Positioner>
+						<Popover.Content
+							class="card p-2 bg-surface-50-950 w-fit shadow-lg space-y-2 border border-surface-200 z-10"
+						>
+							{#if showResult}
+								<div>
+									<span class="text-sm font-bold">{m.result()}</span>
+									<div
+										class="flex flex-wrap gap-2 text-xs bg-surface-200-800 border-2 p-1 rounded-md"
+									>
+										{#each Object.entries(complianceResultColorMap) as [result, color]}
+											<button
+												type="button"
+												onclick={() => toggleResult(result)}
+												class="px-2 py-1 rounded-md font-bold"
+												style="background-color: {selectedResults.includes(result)
+													? color
+													: 'grey'}; color: {selectedResults.includes(result)
+													? result === 'not_applicable'
+														? 'white'
+														: 'black'
+													: 'black'}; opacity: {selectedResults.includes(result) ? 1 : 0.3};"
+											>
+												{safeTranslate(result)}
+											</button>
+										{/each}
+									</div>
+								</div>
+							{/if}
+							{#if showStatus}
+								<div>
+									<span class="text-sm font-bold">{m.status()}</span>
+									<div
+										class="flex flex-wrap w-fit gap-2 text-xs bg-surface-200-800 border-2 p-1 rounded-md"
+									>
+										{#each Object.entries(complianceStatusColorMap) as [status, color]}
+											<button
+												type="button"
+												onclick={() => toggleStatus(status)}
+												class="px-2 py-1 rounded-md font-bold"
+												style="background-color: {selectedStatus.includes(status)
+													? color + '44'
+													: 'grey'}; color: {selectedStatus.includes(status)
+													? darkenColor(color, 0.3)
+													: 'black'}; opacity: {selectedStatus.includes(status) ? 1 : 0.3};"
+											>
+												{safeTranslate(status)}
+											</button>
+										{/each}
+									</div>
+								</div>
+							{/if}
+							{#if showExtendedResult}
+								<div>
+									<span class="text-sm font-bold">{m.extendedResult()}</span>
+									<div
+										class="flex flex-wrap w-fit gap-2 text-xs bg-surface-200-800 border-2 p-1 rounded-md"
+									>
+										{#each Object.entries(extendedResultColorMap) as [extendedResult, color]}
+											<button
+												type="button"
+												onclick={() => toggleExtendedResult(extendedResult)}
+												class="px-2 py-1 rounded-md font-bold"
+												style="background-color: {selectedExtendedResults.includes(extendedResult)
+													? color
+													: 'grey'}; color: white; opacity: {selectedExtendedResults.includes(
+													extendedResult
+												)
+													? 1
+													: 0.3};"
+											>
+												{safeTranslate(extendedResult)}
+											</button>
+										{/each}
+									</div>
+								</div>
+							{/if}
+							<div>
+								<span class="text-sm font-bold">{m.ShowOnlyAssessable()}</span>
+								<div id="toggle" class="flex items-center space-x-4 text-xs ml-auto mr-4">
+									<Switch
+										name="questionnaireToggle"
+										class="flex flex-row items-center justify-center"
+										checked={displayOnlyAssessableNodes}
+										onCheckedChange={(e) => {
+											displayOnlyAssessableNodes = e.checked;
+											auditFiltersStore.setDisplayOnlyAssessableNodes(id, e.checked);
+										}}
+									>
+										<Switch.Control>
+											<Switch.Thumb />
+										</Switch.Control>
+										<Switch.HiddenInput />
+										{#if displayOnlyAssessableNodes}
+											<span class="font-bold text-xs text-primary-500">{m.yes()}</span>
+										{:else}
+											<span class="font-bold text-xs text-surface-600-400">{m.no()}</span>
+										{/if}
+									</Switch>
+								</div>
+							</div>
+						</Popover.Content>
+					</Popover.Positioner>
+				</Popover>
+			</div>
+		</div>
+
+		<div class="flex items-center my-2 text-xs space-x-2 text-surface-600-400">
+			<i class="fa-solid fa-diagram-project"></i>
+			<p>{m.mappingInferenceTip()}</p>
+		</div>
+		{#key data}
+			{#key displayOnlyAssessableNodes || selectedStatus || selectedResults || selectedExtendedResults}
+				<RecursiveTreeView
+					nodes={transformToTreeView(Object.entries(tree))}
+					bind:expandedNodes
+					hover="hover:bg-initial"
+				/>
+			{/key}
+		{/key}
+	</div>
+</div>
+{#if threatDialogOpen}
+	<dialog
+		bind:this={dialogElement}
+		class="fixed inset-0 m-auto w-[90vw] max-w-5xl h-[85vh] rounded-2xl bg-surface-50-950 shadow-2xl border border-surface-200-800 p-0 overflow-hidden backdrop:bg-black/40"
+		aria-labelledby="threats-dialog-title"
+		onclose={() => (threatDialogOpen = false)}
+	>
+		<div class="flex justify-between items-center px-6 py-4 border-b border-surface-100-900">
+			<h3 id="threats-dialog-title" class="text-lg font-bold text-surface-900-100">
+				{m.potentialThreats()}
+			</h3>
+			<button
+				class="flex items-center justify-center w-8 h-8 rounded-lg hover:bg-surface-200-800 transition-colors text-surface-600-400 hover:text-surface-700-300"
+				aria-label="Close"
+				onclick={closeThreatsDialog}
+			>
+				<i class="fa-solid fa-times"></i>
+			</button>
+		</div>
+		<div class="p-4 h-[calc(85vh-64px)] overflow-auto">
+			<ForceCirclePacking
+				data={data.threats.graph}
+				name="threats_graph"
+				height="h-[calc(85vh-120px)]"
+			/>
+		</div>
+	</dialog>
+{/if}
+
+<GenerateAuditReportModal
+	open={showReportModal}
+	audit={selectedReportAudit}
+	onClose={() => (showReportModal = false)}
+/>

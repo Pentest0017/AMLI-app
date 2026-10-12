@@ -1,0 +1,194 @@
+services:
+  db:
+    container_name: db
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    restart: always
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-Ciso_assistant_pass123!}"
+      MSSQL_PID: "Developer"
+    ports:
+      - "1433:1433"
+    volumes:
+      - mssql_data:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P $${MSSQL_SA_PASSWORD:-Ciso_assistant_pass123!} -C -Q 'SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  mailhog:
+    container_name: mailhog
+    image: docker.io/mailhog/mailhog
+    restart: always
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+
+  backend:
+    container_name: backend
+    build: ./backend
+    image: localhost/amli-backend:local
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-backend,localhost}
+      - CISO_ASSISTANT_URL=${CISO_ASSISTANT_URL:-https://localhost:8443}
+      - DJANGO_DEBUG=${DJANGO_DEBUG:-True}
+      - CSRF_TRUSTED_ORIGINS=${CSRF_TRUSTED_ORIGINS:-}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DB_ODBC_DRIVER=${DB_ODBC_DRIVER:-ODBC Driver 18 for SQL Server}
+      - DB_ODBC_EXTRA_PARAMS=${DB_ODBC_EXTRA_PARAMS:-TrustServerCertificate=yes}
+      - AUTH_TOKEN_TTL=${AUTH_TOKEN_TTL:-7200}
+      - CISO_ASSISTANT_SUPERUSER_EMAIL=${CISO_ASSISTANT_SUPERUSER_EMAIL:-}
+      - CISO_ASSISTANT_SUPERUSER_PASSWORD=${CISO_ASSISTANT_SUPERUSER_PASSWORD:-}
+      - DB_ENGINE=${DB_ENGINE:-mssql}
+      - DB_NAME=${DB_NAME:-master}
+      - DB_USER=${DB_USER:-sa}
+      - DB_PASSWORD=${DB_PASSWORD:-Ciso_assistant_pass123!}
+      - DB_HOST=${DB_HOST:-db}
+      - DB_PORT=${DB_PORT:-1433}
+      - HOME=/tmp
+      - XDG_CACHE_HOME=/tmp/.cache
+      - XDG_CONFIG_HOME=/tmp/.config
+      - XDG_DATA_HOME=/tmp/.local/share
+      - QDRANT_URL=http://qdrant:6333
+      - EMAIL_PROVIDER=${EMAIL_PROVIDER:-mailhog}
+      - MICROSOFT_TENANT_ID=${MICROSOFT_TENANT_ID:-}
+      - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID:-}
+      - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET:-}
+      - DEFAULT_FROM_EMAIL=${DEFAULT_FROM_EMAIL:-noreply@ciso.assistant}
+      - EMAIL_HOST=${EMAIL_HOST:-mailhog}
+      - EMAIL_PORT=${EMAIL_PORT:-1025}
+      - EMAIL_USE_TLS=${EMAIL_USE_TLS:-False}
+    read_only: false
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev
+
+    volumes:
+      - ./db:/code/db
+    user: "1001:1001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://backend:8000/api/health/ || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 150s
+
+  huey:
+    container_name: huey
+    build: ./backend
+    image: localhost/amli-backend:local
+    depends_on:
+      backend:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    restart: always
+    environment:
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-backend,localhost}
+      - CISO_ASSISTANT_URL=${CISO_ASSISTANT_URL:-https://localhost:8443}
+      - DJANGO_DEBUG=${DJANGO_DEBUG:-False}
+      - CSRF_TRUSTED_ORIGINS=${CSRF_TRUSTED_ORIGINS:-}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DB_ODBC_DRIVER=${DB_ODBC_DRIVER:-ODBC Driver 18 for SQL Server}
+      - DB_ODBC_EXTRA_PARAMS=${DB_ODBC_EXTRA_PARAMS:-TrustServerCertificate=yes}
+      - AUTH_TOKEN_TTL=${AUTH_TOKEN_TTL:-7200}
+      - DB_ENGINE=${DB_ENGINE:-mssql}
+      - DB_NAME=${DB_NAME:-master}
+      - DB_USER=${DB_USER:-sa}
+      - DB_PASSWORD=${DB_PASSWORD:-Ciso_assistant_pass123!}
+      - DB_HOST=${DB_HOST:-db}
+      - DB_PORT=${DB_PORT:-1433}
+      - HOME=/tmp
+      - XDG_CACHE_HOME=/tmp/.cache
+      - XDG_CONFIG_HOME=/tmp/.config
+      - XDG_DATA_HOME=/tmp/.local/share
+      - QDRANT_URL=http://qdrant:6333
+      - EMAIL_PROVIDER=${EMAIL_PROVIDER:-mailhog}
+      - MICROSOFT_TENANT_ID=${MICROSOFT_TENANT_ID:-}
+      - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID:-}
+      - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET:-}
+      - DEFAULT_FROM_EMAIL=${DEFAULT_FROM_EMAIL:-noreply@ciso.assistant}
+      - EMAIL_HOST=${EMAIL_HOST:-mailhog}
+      - EMAIL_PORT=${EMAIL_PORT:-1025}
+      - EMAIL_USE_TLS=${EMAIL_USE_TLS:-False}
+    read_only: false
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev
+
+    volumes:
+      - ./db:/code/db
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        python manage.py run_huey -w 2 --scheduler-interval 60
+    user: "1001:1001"
+
+  frontend:
+    container_name: frontend
+    environment:
+      - PUBLIC_BACKEND_API_URL=${PUBLIC_BACKEND_API_URL:-http://backend:8000/api}
+      - PUBLIC_BACKEND_API_EXPOSED_URL=${PUBLIC_BACKEND_API_EXPOSED_URL:-https://localhost:8443/api}
+      - PROTOCOL_HEADER=x-forwarded-proto
+      - HOST_HEADER=x-forwarded-host
+      - HOME=/tmp
+      - XDG_CACHE_HOME=/tmp/.cache
+      - XDG_CONFIG_HOME=/tmp/.config
+      - XDG_DATA_HOME=/tmp/.local/share
+    build: ./frontend
+    image: localhost/amli-frontend:local
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev
+    restart: always
+    depends_on:
+      backend:
+        condition: service_healthy
+    user: "1001:1001"
+
+  qdrant:
+    container_name: qdrant
+    image: docker.io/qdrant/qdrant:v1.14.0
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  caddy:
+    container_name: caddy
+    image: docker.io/library/caddy:2.11.2
+    environment:
+      - CISO_ASSISTANT_URL=${CISO_ASSISTANT_URL:-https://localhost:8443}
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    ports:
+      - 8443:8443
+    volumes:
+      - ./db/caddy:/data/caddy
+    command: |
+      sh -c 'echo $$CISO_ASSISTANT_URL "{
+      reverse_proxy /api/* backend:8000
+      reverse_proxy /* frontend:3000
+      tls internal
+      }" > Caddyfile && caddy run'
+
+volumes:
+  qdrant_data:
+  mssql_data:

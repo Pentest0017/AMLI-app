@@ -1,0 +1,64 @@
+<script lang="ts">
+	import Article from '$lib/components/DataViz/Article.svelte';
+	import { pageTitle } from '$lib/utils/stores';
+	import { m } from '$paraglide/messages';
+
+	$pageTitle = 'Experimental';
+</script>
+
+<div class="bg-surface-50-950 grid grid-cols-2 p-4 gap-4 card">
+	<Article
+		title={m.requirementsExplorer()}
+		desc={m.visualizeRequirements()}
+		link="/requirement-assessments"
+		tags={['analysis', 'audit']}
+	/>
+	<Article
+		title={m.findings()}
+		desc={m.findingsExplorer()}
+		link="/findings"
+		tags={['analysis', 'findings']}
+	/>
+	<Article
+		title="Batch Creation"
+		desc="Create multiple assets, entities, or feared events at once from a simple text list"
+		link="/experimental/batch-create"
+		tags={['assets', 'entities', 'ebios-rm', 'bulk']}
+	/>
+	<Article
+		title={m.lbListLibraryBuilder()}
+		desc={m.lbListCardDesc()}
+		link="/experimental/library-builder"
+		tags={['libraries', 'builder', 'packager']}
+	/>
+	<Article
+		title="Bulk evidence upload"
+		desc="Upload multiple files or a whole directory as evidences, with conflict-resolution strategies (skip, add revision, replace, rename) and SHA-256 duplicate detection."
+		link="/experimental/evidence-bulk-upload"
+		tags={['evidences', 'bulk', 'upload']}
+	/>
+	<Article
+		title="Questionnaire Autopilot"
+		desc="Upload a customer security questionnaire (.xlsx), scope it to a folder, then map its columns. LLM prefill comes next."
+		link="/experimental/questionnaire-autopilot"
+		tags={['agentic', 'questionnaire', 'vendor-due-diligence']}
+	/>
+	<Article
+		title="Asset Whiteboard"
+		desc="Place and link assets on a freeform canvas, per domain. Drawn edges update parent_assets in real time; positions saved in your browser."
+		link="/experimental/asset-board"
+		tags={['assets', 'graph', 'canvas', 'prototype']}
+	/>
+	<Article
+		title="Analytics Export"
+		desc="Export all analytics dashboard data as a multi-sheet Excel file (Summary, Risk Levels, Compliance, Controls, Incidents) — ready to use in Power BI or any reporting tool."
+		link="/experimental/analytics-export"
+		tags={['analytics', 'export', 'xlsx', 'reporting']}
+	/>
+	<!-- <Article -->
+	<!-- 	title="Multi-file evidence (UX prototype)" -->
+	<!-- 	desc="Imagine an evidence whose revisions hold multiple files at once. History timeline with file-level diff (added / removed / replaced / unchanged) and arbitrary revision compare. Static fake data, no backend." -->
+	<!-- 	link="/experimental/evidence-multifile" -->
+	<!-- 	tags={['evidences', 'history', 'ux', 'prototype']} -->
+	<!-- /> -->
+</div>

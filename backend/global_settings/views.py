@@ -1,0 +1,484 @@
+from rest_framework import permissions, serializers, viewsets
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.decorators import action
+
+from core.permissions import IsGlobalAdmin
+from core.serializers import SerializerFactory
+from iam.models import Folder, Permission, RoleAssignment, User
+from iam.sso.models import SSOSettings
+from integrations.models import IntegrationProvider
+from core.serializers import SerializerFactory
+from django.conf import settings
+from django.http import JsonResponse
+from django.views.decorators.http import require_GET
+from .serializers import (
+    GlobalSettingsSerializer,
+    GeneralSettingsSerializer,
+    FeatureFlagsSerializer,
+    VulnerabilitySlaSerializer,
+    SecIntelFeedsSerializer,
+    InfraConfigSerializer,
+)
+from django.db import transaction
+from .models import GlobalSettings
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+
+class GlobalSettingsSerializerFactory(SerializerFactory):
+    """Factory to get a serializer class from a list of modules.
+    Attributes:
+    modules (list): List of module names to search for the serializer.
+    """
+
+    def __init__(self, *modules: str):
+        # Reverse to prioritize later modules
+        self.modules = list(reversed(modules))
+
+    def get_serializer(self, base_name: str, action: str = "default"):
+        return self._get_serializer_class(f"{base_name}Serializer")
+
+
+class GlobalSettingsViewSet(viewsets.ModelViewSet):
+    queryset = GlobalSettings.objects.all()
+    serializer_class = GlobalSettingsSerializer
+
+    def create(self, request, *args, **kwargs):
+        return Response(
+            {"detail": "Global settings can only be created through data migrations."},
+            status=405,
+        )
+
+    def delete(self, request, *args, **kwargs):
+        return Response(
+            {"detail": "Global settings can only be deleted through data migrations."},
+            status=405,
+        )
+
+    def update(self, request, *args, **kwargs):
+        return Response(
+            {"detail": "Global settings can only be updated through data migrations."},
+            status=405,
+        )
+
+
+class FeatureFlagsViewSet(viewsets.ModelViewSet):
+    model = GlobalSettings
+    serializer_class = FeatureFlagsSerializer
+    queryset = GlobalSettings.objects.filter(name="feature-flags")
+    serializers_module = "global_settings.serializers"
+
+    def get_permissions(self):
+        if self.request.method in ("GET", "HEAD", "OPTIONS"):
+            return [IsAuthenticated()]
+        return super().get_permissions()
+
+    def get_serializer_class(self, **kwargs):
+        serializer_factory = GlobalSettingsSerializerFactory(
+            self.serializers_module, settings.MODULE_PATHS.get("serializers", [])
+        )
+        serializer_class = serializer_factory.get_serializer(
+            "FeatureFlags", kwargs.get("action", "default")
+        )
+        logger.debug(
+            "Serializer class",
+            serializer_class=serializer_class,
+            action=kwargs.get("action", self.action),
+            viewset=self,
+            module_paths=settings.MODULE_PATHS,
+        )
+
+        return serializer_class
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer_class()(instance)
+        return Response(serializer.data)
+
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer_class()(instance, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+    def get_object(self):
+        obj, _ = self.model.objects.get_or_create(name="feature-flags")
+        obj.is_published = True  # we could do that at creation, but it's ok here
+        obj.save(update_fields=["is_published"])
+        self.check_object_permissions(self.request, obj)
+        return obj
+
+    @action(detail=True, methods=["get"])
+    def defaults(self, request, pk=None):
+        """Expose each flag's serializer default so the frontend "Reset to
+        defaults" never drifts from the backend. Only exposed flags are
+        returned (get_fields already drops gated ones like chat_mode)."""
+        serializer = self.get_serializer_class()()
+        flag_defaults = {
+            name: field.default
+            for name, field in serializer.fields.items()
+            if name not in serializer.Meta.read_only_fields
+            and getattr(field, "default", serializers.empty) is not serializers.empty
+        }
+        return Response(flag_defaults)
+
+
+class GeneralSettingsViewSet(viewsets.ModelViewSet):
+    model = GlobalSettings
+    serializer_class = GeneralSettingsSerializer
+    queryset = GlobalSettings.objects.filter(name="general")
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        # Clear cached LLM/embedder so new settings take effect immediately
+        from django.conf import settings as django_settings
+
+        if getattr(django_settings, "ENABLE_CHAT", False):
+            from chat.providers import clear_provider_cache
+
+            clear_provider_cache()
+        return Response(serializer.data)
+
+    def get_object(self):
+        obj = self.model.objects.get(name="general")
+        obj.is_published = True  # we could do that at creation, but it's ok here
+        obj.save(update_fields=["is_published"])
+        self.check_object_permissions(self.request, obj)
+        return obj
+
+    @action(detail=True, name="Get write data")
+    def object(self, request, pk=None):
+        default_settings = {
+            "security_objective_scale": "1-4",
+            "ebios_radar_max": 6,
+            "ebios_radar_green_zone_radius": 0.2,
+            "ebios_radar_yellow_zone_radius": 0.9,
+            "ebios_radar_red_zone_radius": 2.5,
+            "notifications_enable_mailing": False,
+            "interface_agg_scenario_matrix": False,
+            "risk_matrix_swap_axes": False,
+            "risk_matrix_flip_vertical": False,
+            "risk_matrix_labels": "ISO",
+            "mapping_max_depth": 3,
+            "allow_self_validation": False,
+            "show_warning_external_links": True,
+            "show_get_started": True,
+            "personal_folders": False,
+            "builtin_metrics_retention_days": 730,  # 2 years default, minimum is 1
+            "allow_assignments_to_entities": False,
+            "enforce_mfa": False,
+            "default_language": "en",
+            "default_custom_analytics_dashboard": None,
+            "default_packager": "custom",
+            "disable_partially_compliant_result": False,
+        }
+
+        settings, created = GlobalSettings.objects.get_or_create(name="general")
+
+        if created or not all(key in settings.value for key in default_settings):
+            existing_value = settings.value or {}
+            updated_value = {**default_settings, **existing_value}
+            settings.value = updated_value
+            settings.save()
+
+        enabled_integrations = (
+            IntegrationProvider.objects.filter(is_active=True)
+            .distinct()
+            .values("id", "provider_type", "name", "configurations")
+        )
+        settings.value["enabled_integrations"] = list(enabled_integrations)
+
+        return Response(GeneralSettingsSerializer(settings).data.get("value"))
+
+    @action(detail=True, name="Get available languages")
+    def default_language(self, request, pk=None):
+        choices = {code: name for code, name in settings.LANGUAGES}
+        return Response(choices)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        name="Set default custom analytics dashboard",
+        url_path="set-default-dashboard",
+    )
+    def set_default_dashboard(self, request, pk=None):
+        """Partial update of the default_custom_analytics_dashboard key.
+
+        Guarded by change_globalsettings so non-admins can't change the
+        org-wide default from the analytics Custom tab.
+
+        Note: this bypasses GeneralSettingsSerializer.update on purpose
+        because that serializer replaces the entire `value` dict with the
+        payload (no real PATCH semantics). For this single-key change we
+        merge into the existing dict. If the general settings ever grow
+        cross-key side effects beyond currency propagation, route this
+        through the serializer instead.
+        """
+        from .serializers import validate_default_dashboard_value
+
+        perm = Permission.objects.get(codename="change_globalsettings")
+        if not RoleAssignment.is_access_allowed(
+            user=request.user,
+            perm=perm,
+            folder=Folder.get_root_folder(),
+        ):
+            return Response(
+                {"error": "You do not have permission to change global settings."},
+                status=403,
+            )
+
+        try:
+            new_value = validate_default_dashboard_value(
+                request.data.get("dashboard_id")
+            )
+        except serializers.ValidationError as exc:
+            return Response({"error": exc.detail}, status=400)
+
+        settings_obj, _ = GlobalSettings.objects.get_or_create(name="general")
+        if not isinstance(settings_obj.value, dict):
+            settings_obj.value = {}
+        settings_obj.value["default_custom_analytics_dashboard"] = new_value
+        # Include updated_at because AbstractBaseModel uses auto_now and Django
+        # only refreshes auto_now fields named in update_fields.
+        settings_obj.save(update_fields=["value", "updated_at"])
+        return Response({"default_custom_analytics_dashboard": new_value})
+
+    @action(detail=True, name="Get available dashboards for the custom analytics tab")
+    def default_custom_analytics_dashboard(self, request, pk=None):
+        """Return a {dashboard_uuid: dashboard_name} map of dashboards
+        the requester can see, so an admin can pick one as the
+        instance default for the analytics Custom tab.
+        """
+        from metrology.models import Dashboard
+
+        accessible_ids, _, _ = RoleAssignment.get_accessible_object_ids(
+            Folder.get_root_folder(), request.user, Dashboard
+        )
+        dashboards = Dashboard.objects.filter(id__in=accessible_ids).order_by("name")
+        choices = {"": "—"}
+        for d in dashboards:
+            choices[str(d.id)] = d.name
+        return Response(choices)
+
+    @action(detail=True, methods=["post"], name="Force language for all users")
+    def force_language(self, request, pk=None):
+        perm = Permission.objects.get(codename="change_user")
+        if not RoleAssignment.is_access_allowed(
+            user=request.user,
+            perm=perm,
+            folder=Folder.get_root_folder(),
+        ):
+            return Response(
+                {"error": "You do not have permission to change user preferences."},
+                status=403,
+            )
+        general = GlobalSettings.objects.filter(name="general").first()
+        lang = (
+            general.value.get("default_language")
+            if general and isinstance(general.value, dict)
+            else None
+        )
+        if not lang or lang not in dict(settings.LANGUAGES):
+            return Response(
+                {"error": "No valid default language configured in general settings."},
+                status=400,
+            )
+        with transaction.atomic():
+            users = User.objects.select_for_update().all()
+            updated = 0
+            for user in users:
+                if not isinstance(user.preferences, dict):
+                    user.preferences = {}
+                user.preferences["lang"] = lang
+                user.save(update_fields=["preferences"])
+                updated += 1
+        return Response({"updated": updated, "language": lang})
+
+    @action(detail=True, name="Get security objective scales")
+    def security_objective_scale(self, request):
+        choices = {
+            "1-3": "1-3",
+            "1-4": "1-4",
+            "1-5": "1-5",
+            "0-3": "0-3",
+            "0-4": "0-4",
+            "FIPS-199": "FIPS-199",
+        }
+        return Response(choices)
+
+    @action(detail=True, name="Get ebios rm radar parameters")
+    def ebios_radar_parameters(self, request):
+        ebios_rm_parameters = {
+            "ebios_radar_max": self.get_object().value.get("ebios_radar_max"),
+            "ebios_radar_green_zone_radius": self.get_object().value.get(
+                "ebios_radar_green_zone_radius"
+            ),
+            "ebios_radar_yellow_zone_radius": self.get_object().value.get(
+                "ebios_radar_yellow_zone_radius"
+            ),
+            "ebios_radar_red_zone_radius": self.get_object().value.get(
+                "ebios_radar_red_zone_radius"
+            ),
+        }
+        return Response(ebios_rm_parameters)
+
+    @action(detail=True, name="Get notifications settings")
+    def notifications_settings(self, request):
+        notifications_settings = {
+            "notifications_enable_mailing": self.get_object().value.get(
+                "notifications_enable_mailing"
+            ),
+        }
+        return Response(notifications_settings)
+
+    @action(detail=True, name="Get interface settings")
+    def interface_settings(self, request):
+        interface_settings = {
+            "interface_agg_scenario_matrix": self.get_object().value.get(
+                "interface_agg_scenario_matrix"
+            ),
+        }
+        return Response(interface_settings)
+
+
+class VulnerabilitySlaViewSet(viewsets.ModelViewSet):
+    model = GlobalSettings
+    serializer_class = VulnerabilitySlaSerializer
+    queryset = GlobalSettings.objects.filter(name="vulnerability-sla")
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+    def get_object(self):
+        obj, _ = self.model.objects.get_or_create(name="vulnerability-sla")
+        obj.is_published = True
+        obj.save(update_fields=["is_published"])
+        self.check_object_permissions(self.request, obj)
+        return obj
+
+
+class SecIntelFeedsViewSet(viewsets.ModelViewSet):
+    model = GlobalSettings
+    serializer_class = SecIntelFeedsSerializer
+    queryset = GlobalSettings.objects.filter(name="sec-intel-feeds")
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+    def get_object(self):
+        obj, _ = self.model.objects.get_or_create(name="sec-intel-feeds")
+        obj.is_published = True
+        obj.save(update_fields=["is_published"])
+        self.check_object_permissions(self.request, obj)
+        return obj
+
+
+class InfraConfigViewSet(viewsets.ModelViewSet):
+    """Singleton GET/PUT for infrastructure configuration settings (stored as a
+    JSON object). Restricted to administrators."""
+
+    model = GlobalSettings
+    serializer_class = InfraConfigSerializer
+    queryset = GlobalSettings.objects.filter(name="infra-config")
+    permission_classes = [IsAuthenticated, IsGlobalAdmin]
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+    def get_object(self):
+        obj, _ = self.model.objects.get_or_create(name="infra-config")
+        obj.is_published = True
+        obj.save(update_fields=["is_published"])
+        self.check_object_permissions(self.request, obj)
+        return obj
+
+
+@require_GET
+def infra_config_view(request):
+    """Unauthenticated endpoint exposing infrastructure configuration settings
+    for the infrastructure layer to consume.
+
+    Mirrors the /metrics endpoint contract: it must never be reachable from
+    the public internet — keep it behind the reverse proxy / restricted to
+    trusted networks. Only registered when ENABLE_INFRA_CONFIG_MANAGEMENT is set.
+    """
+    obj = GlobalSettings.objects.filter(name="infra-config").first()
+    value = obj.value if obj and isinstance(obj.value, dict) else {}
+    allowed_ips = value.get("allowed_ips", [])
+    if not isinstance(allowed_ips, list):
+        allowed_ips = []
+    return JsonResponse({"allowed_ips": allowed_ips})
+
+
+@api_view(["GET"])
+@permission_classes([permissions.AllowAny])
+def get_sso_info(request):
+    """
+    API endpoint that returns the CSRF token.
+    """
+    sso_settings = SSOSettings.objects.get()
+    sp_entity_id = sso_settings.settings["sp"].get("entity_id")
+    callback_url = settings.CISO_ASSISTANT_URL + "/"
+    return Response(
+        {
+            "is_enabled": sso_settings.is_enabled,
+            "sp_entity_id": sp_entity_id,
+            "callback_url": callback_url,
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([permissions.AllowAny])
+def get_default_language(request):
+    """
+    Returns the configured default language. Falls back to English if unset or invalid.
+    """
+    general = GlobalSettings.objects.filter(name="general").first()
+    default_language = "en"
+    if general and isinstance(general.value, dict):
+        default_language = general.value.get("default_language", default_language)
+
+    if default_language not in dict(settings.LANGUAGES):
+        default_language = "en"
+
+    return Response({"default_language": default_language})

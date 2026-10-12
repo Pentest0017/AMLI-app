@@ -1,0 +1,52 @@
+name: Frontend code coverage
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-coverage.yaml"
+  workflow_dispatch:
+
+# Cancel older in-progress runs for the same PR or the same ref (branch)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  GITHUB_WORKFLOW: github_actions
+  UBUNTU_VERSION: "ubuntu-24.04"
+  NODE_VERSION: "22"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      working-directory: ./frontend
+
+    strategy:
+      max-parallel: 4
+      matrix:
+        node-version: ["24"]
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up node ${{ matrix.node-version }}
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Install pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 10
+      - name: Install dependencies
+        working-directory: ${{env.working-directory}}
+        run: pnpm i --frozen-lockfile
+      - name: Prepare sveltekit
+        working-directory: ${{env.working-directory}}
+        run: pnpm run prepare
+      - name: Run coverage
+        working-directory: ${{env.working-directory}}
+        run: pnpm run coverage
