@@ -234,6 +234,7 @@ $SUDO $ENGINE exec backend python manage.py migrate --noinput
 say "7/7 Done"
 $COMPOSE ps
 echo
+if curl -ksf -o /dev/null --max-time 20 https://localhost:8443/; then echo "Self-check: port 8443 answers locally - OK"; else echo "WARNING: nothing answered on https://localhost:8443 yet - check: $ENGINE logs caddy"; fi
 echo "AMLI is running at: ${URL}"
 echo "Admin login:  $(envval CISO_ASSISTANT_SUPERUSER_EMAIL)"
 if [ -n "$GENERATED_ADMIN_PW" ]; then echo "Admin password: ${GENERATED_ADMIN_PW}   (also saved in .env - change it after first login)"; fi

@@ -8,7 +8,7 @@ services:
       MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-Ciso_assistant_pass123!}"
       MSSQL_PID: "Developer"
     ports:
-      - "1433:1433"
+      - "127.0.0.1:1433:1433"
     volumes:
       - mssql_data:/var/opt/mssql
     healthcheck:
@@ -22,8 +22,8 @@ services:
     image: docker.io/mailhog/mailhog
     restart: always
     ports:
-      - "8025:8025"
-      - "1025:1025"
+      - "127.0.0.1:8025:8025"
+      - "127.0.0.1:1025:1025"
 
   backend:
     container_name: backend
