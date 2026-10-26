@@ -57,6 +57,11 @@ if [ ! -f .env ]; then
   rand() { head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c "$1"; }
   SECRET_KEY_GEN="${AMLI_SECRET_KEY:-$(rand 64)}"
   [ -n "$DB_PW_GEN" ] || DB_PW_GEN="Isg$(rand 16)Aa1!"
+  # If a database backup (e.g. ISGRC.bak) was copied to this server, restore it under the same name
+  if [ -z "${AMLI_DB_NAME:-}" ]; then
+    FOUND_BAK="$(ls "$(pwd)"/restore/*.bak "$HOME"/*.bak "$(pwd)"/../*.bak 2>/dev/null | head -n1 || true)"
+    [ -n "$FOUND_BAK" ] && AMLI_DB_NAME="$(basename "$FOUND_BAK" .bak)" && echo "Found backup $FOUND_BAK - database will be restored as $AMLI_DB_NAME"
+  fi
   cp "$TEMPLATE" .env
   sed -i -e "s|__HOST__|${HOST_IP}|g" -e "s|__SECRET_KEY__|${SECRET_KEY_GEN}|" -e "s|__DB_PASSWORD__|${DB_PW_GEN}|g" -e "s|__DB_NAME__|${AMLI_DB_NAME:-master}|g" .env
   chmod 600 .env

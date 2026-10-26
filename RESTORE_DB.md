@@ -5,10 +5,10 @@
    BACKUP DATABASE [ISGRC] TO DISK = N'C:\Backup\ISGRC.bak' WITH COPY_ONLY, INIT, COMPRESSION;
    ```
 2. Copy `ISGRC.bak` to the Linux server's home folder (`~`) by USB or scp. **Never commit it to GitHub - it holds your data.**
-3. Take `DJANGO_SECRET_KEY` from the current app's `.env`; the restored data (sessions, encrypted fields) needs the same key.
-4. Run:
+3. (Optional) If you still have the old `DJANGO_SECRET_KEY`, pass it as `AMLI_SECRET_KEY`. Without it everyone just logs in again.
+4. Run (no variables needed):
    ```bash
-   AMLI_DB_NAME=ISGRC AMLI_SECRET_KEY='<current DJANGO_SECRET_KEY>' bash install.sh
+   bash install.sh
    ```
    `deploy.sh` finds `~/ISGRC.bak` (or `./restore/*.bak`), restores it into the SQL Server container as `ISGRC`, then starts the app.
    Log in with your existing accounts.
