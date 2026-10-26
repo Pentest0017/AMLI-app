@@ -55,10 +55,10 @@ if [ ! -f .env ]; then
   HOST_IP="${AMLI_HOST:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
   [ -n "$HOST_IP" ] || HOST_IP="localhost"
   rand() { head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c "$1"; }
-  SECRET_KEY_GEN="$(rand 64)"
+  SECRET_KEY_GEN="${AMLI_SECRET_KEY:-$(rand 64)}"
   [ -n "$DB_PW_GEN" ] || DB_PW_GEN="Isg$(rand 16)Aa1!"
   cp "$TEMPLATE" .env
-  sed -i -e "s|__HOST__|${HOST_IP}|g" -e "s|__SECRET_KEY__|${SECRET_KEY_GEN}|" -e "s|__DB_PASSWORD__|${DB_PW_GEN}|g" .env
+  sed -i -e "s|__HOST__|${HOST_IP}|g" -e "s|__SECRET_KEY__|${SECRET_KEY_GEN}|" -e "s|__DB_PASSWORD__|${DB_PW_GEN}|g" -e "s|__DB_NAME__|${AMLI_DB_NAME:-master}|g" .env
   chmod 600 .env
   echo "Server address set to ${HOST_IP} (override with: AMLI_HOST=<ip-or-name> bash deploy.sh)"
 fi
@@ -192,6 +192,32 @@ if [ "$LOCAL_DB" = 1 ]; then
   $COMPOSE up -d --no-build --no-deps db mailhog qdrant
   echo "Waiting for database container..."
   wait_healthy db 60
+  # Restore a backup of the existing database, if one was supplied (see RESTORE_DB.md)
+  BAK="$(ls "$(pwd)"/restore/*.bak "$HOME"/*.bak "$(pwd)"/../*.bak 2>/dev/null | head -n1 || true)"
+  TARGET_DB="$(envval DB_NAME)"
+  if [ -n "$BAK" ] && [ "$TARGET_DB" != "master" ]; then
+    SAPW="$(envval MSSQL_SA_PASSWORD)"
+    SQLC="$SUDO $ENGINE exec -e SQLCMDPASSWORD=$SAPW db /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -C -b"
+    if $SQLC -h -1 -W -Q "SET NOCOUNT ON; SELECT name FROM sys.databases WHERE name='${TARGET_DB}'" | grep -qx "$TARGET_DB"; then
+      echo "Database ${TARGET_DB} already exists - skipping restore."
+    else
+      say "Restoring ${TARGET_DB} from $BAK"
+      chmod 644 "$BAK" 2>/dev/null || true
+      $SUDO $ENGINE exec db mkdir -p /var/opt/mssql/backup
+      $SUDO $ENGINE cp "$BAK" db:/var/opt/mssql/backup/restore.bak
+      MOVES=""
+      while IFS='|' read -r lname _ ftype _; do
+        [ -n "$lname" ] || continue
+        case "$ftype" in
+          L) MOVES="$MOVES, MOVE N'$lname' TO N'/var/opt/mssql/data/${TARGET_DB}_$lname.ldf'";;
+          *) MOVES="$MOVES, MOVE N'$lname' TO N'/var/opt/mssql/data/${TARGET_DB}_$lname.mdf'";;
+        esac
+      done < <($SQLC -h -1 -W -s '|' -Q "SET NOCOUNT ON; RESTORE FILELISTONLY FROM DISK=N'/var/opt/mssql/backup/restore.bak'")
+      $SQLC -Q "RESTORE DATABASE [${TARGET_DB}] FROM DISK=N'/var/opt/mssql/backup/restore.bak' WITH REPLACE${MOVES}"         || fail "Database restore failed (see message above)."
+      $SUDO $ENGINE exec db rm -f /var/opt/mssql/backup/restore.bak
+      echo "Restore complete."
+    fi
+  fi
 else
   $COMPOSE up -d --no-build --no-deps mailhog qdrant
 fi

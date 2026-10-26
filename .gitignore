@@ -84,3 +84,7 @@ Thumbs.db
 backend.ps1
 backend/.win_native_dev_runserver.py
 tools/convert_library_v2.bat
+
+# Database backups (contain real data)
+*.bak
+restore/
