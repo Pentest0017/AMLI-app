@@ -194,7 +194,7 @@ wait_healthy() { # name, tries
 # ---- 5. Start services in stages -------------------------------------------
 say "5/7 Starting services"
 if [ "$LOCAL_DB" = 1 ]; then
-  $COMPOSE up -d --no-build --no-deps db
+  $COMPOSE up -d --no-build --pull never --no-deps db
   echo "Waiting for database container..."
   wait_healthy db 60
   # Restore a backup of the existing database, if one was supplied (see RESTORE_DB.md)
@@ -225,11 +225,11 @@ if [ "$LOCAL_DB" = 1 ]; then
   fi
 fi
 # mail test server and vector search are optional (configure email later); start with AMLI_WITH_EXTRAS=1
-if [ "${AMLI_WITH_EXTRAS:-0}" = 1 ]; then $COMPOSE up -d --no-build --no-deps mailhog qdrant || echo "WARNING: optional mailhog/qdrant failed to start (not needed to log in)."; fi
-$COMPOSE up -d --no-build --no-deps backend
+if [ "${AMLI_WITH_EXTRAS:-0}" = 1 ]; then $COMPOSE up -d --no-build --pull never --no-deps mailhog qdrant || echo "WARNING: optional mailhog/qdrant failed to start (not needed to log in)."; fi
+$COMPOSE up -d --no-build --pull never --no-deps backend
 echo "Waiting for backend (first start can take a few minutes)..."
 wait_healthy backend 60
-$COMPOSE up -d --no-build --no-deps huey frontend caddy
+$COMPOSE up -d --no-build --pull never --no-deps huey frontend caddy
 
 # ---- 6. Migrate -------------------------------------------------------------
 say "6/7 Running database migrations"
