@@ -183,11 +183,7 @@ services:
     volumes:
       - ./db/caddy:/data/caddy
     command: |
-      sh -c 'echo $$CISO_ASSISTANT_URL "{
-      reverse_proxy /api/* backend:8000
-      reverse_proxy /* frontend:3000
-      tls internal
-      }" > Caddyfile && caddy run'
+      sh -c 'U=$$CISO_ASSISTANT_URL; H=$${U#*://}; H=$${H%%:*}; printf "{\ndefault_sni %s\n}\n%s {\nreverse_proxy /api/* backend:8000\nreverse_proxy /* frontend:3000\ntls internal\n}\n" "$$H" "$$U" > Caddyfile && caddy run'
 
 volumes:
   qdrant_data:
